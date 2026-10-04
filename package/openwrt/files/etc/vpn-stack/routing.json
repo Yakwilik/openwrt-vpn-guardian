@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "proxyDomains": [
+    "geosite:openai",
+    "geosite:anthropic",
+    "geosite:google-gemini",
+    "geosite:github",
+    "geosite:youtube",
+    "geosite:telegram",
+    "geosite:whatsapp",
+    "geosite:soundcloud",
+    "geosite:linkedin",
+    "domain:buf.build"
+  ],
+  "proxyIps": []
+}

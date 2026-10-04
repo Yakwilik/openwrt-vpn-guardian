@@ -1,0 +1,989 @@
+package watchdog
+
+import (
+	"bytes"
+	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"os"
+	"os/exec"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"golang.org/x/net/proxy"
+	"golang.org/x/sys/unix"
+	_ "modernc.org/sqlite"
+)
+
+const (
+	dbPath             = "/etc/v2raya/v2raya.db"
+	controlPath        = "/etc/v2raya-failover-control.json"
+	statePath          = "/tmp/vpn-backend-state.json"
+	eventPath          = "/tmp/vpn-dashboard-events.tsv"
+	legacyFailuresPath = "/tmp/vpn-backend-failures"
+	proxyAddr          = "127.0.0.1:20173"
+	tag                = "vpn-backend-watchdog"
+	policyRuntimePath  = "/etc/vpn-policy-runtime"
+	policyModePath     = "/etc/vpn-policy-mode"
+	lockPath           = "/tmp/vpn-backend-watchdog.lock"
+)
+
+type Candidate struct {
+	TouchID        int    `json:"id"`
+	Sub            int    `json:"sub"`
+	SubscriptionID int    `json:"subscriptionId"`
+	Priority       int    `json:"priority"`
+	Sort           int    `json:"sort"`
+	Name           string `json:"name"`
+	Protocol       string `json:"protocol"`
+	Network        string `json:"network"`
+	Security       string `json:"security"`
+}
+
+type Control struct {
+	Mode          string `json:"mode"`
+	FailurePolicy string `json:"failurePolicy"`
+}
+
+type NodeStats struct {
+	Successes           int     `json:"successes"`
+	Failures            int     `json:"failures"`
+	ConsecutiveFailures int     `json:"consecutiveFailures"`
+	LastSuccess         int64   `json:"lastSuccess,omitempty"`
+	LastFailure         int64   `json:"lastFailure,omitempty"`
+	CooldownUntil       int64   `json:"cooldownUntil,omitempty"`
+	EWMALatencyMS       float64 `json:"ewmaLatencyMs,omitempty"`
+}
+
+type State struct {
+	Failures    int                  `json:"failures"`
+	LastCheck   int64                `json:"lastCheck"`
+	LastHealthy int64                `json:"lastHealthy,omitempty"`
+	LastFailure int64                `json:"lastFailure,omitempty"`
+	LastSwitch  int64                `json:"lastSwitch,omitempty"`
+	LastNode    string               `json:"lastNode,omitempty"`
+	LastError   string               `json:"lastError,omitempty"`
+	LastHealth  HealthResult         `json:"lastHealth"`
+	Nodes       map[string]NodeStats `json:"nodes,omitempty"`
+}
+
+type RankedCandidate struct {
+	Candidate
+	Score         float64 `json:"score"`
+	CooldownUntil int64   `json:"cooldownUntil,omitempty"`
+	Cooling       bool    `json:"cooling"`
+}
+
+type ProbeResult struct {
+	Name  string `json:"name"`
+	URL   string `json:"url"`
+	Code  int    `json:"code"`
+	MS    int64  `json:"ms"`
+	Error string `json:"error,omitempty"`
+}
+
+type HealthResult struct {
+	Healthy bool          `json:"healthy"`
+	Status  string        `json:"status"`
+	Passed  int           `json:"passed"`
+	Total   int           `json:"total"`
+	Results []ProbeResult `json:"results"`
+}
+
+func main() {
+	mode := flag.String("mode", "run", "run|daemon|health|inspect")
+	interval := flag.Duration("interval", 10*time.Second, "daemon interval between completed checks")
+	flag.Parse()
+
+	var err error
+	switch *mode {
+	case "run":
+		var lock *os.File
+		lock, err = acquireInstanceLock(false)
+		if errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EAGAIN) {
+			fmt.Println("daemon already running")
+			return
+		}
+		if err == nil {
+			defer releaseInstanceLock(lock)
+			err = run(true)
+		}
+	case "daemon":
+		err = daemon(*interval)
+	case "health":
+		h := healthNow()
+		_ = json.NewEncoder(os.Stdout).Encode(h)
+		if !h.Healthy {
+			os.Exit(2)
+		}
+	case "inspect":
+		err = inspect()
+	default:
+		err = fmt.Errorf("unknown mode %q", *mode)
+	}
+	if err != nil {
+		logLine("error: %v", err)
+		os.Exit(1)
+	}
+}
+
+func acquireInstanceLock(block bool) (*os.File, error) {
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return nil, err
+	}
+	op := unix.LOCK_EX
+	if !block {
+		op |= unix.LOCK_NB
+	}
+	if err := unix.Flock(int(f.Fd()), op); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	return f, nil
+}
+
+func releaseInstanceLock(f *os.File) {
+	if f == nil {
+		return
+	}
+	_ = unix.Flock(int(f.Fd()), unix.LOCK_UN)
+	_ = f.Close()
+}
+
+func daemon(interval time.Duration) error {
+	if interval < time.Second {
+		interval = time.Second
+	}
+	lock, err := acquireInstanceLock(false)
+	if err != nil {
+		return fmt.Errorf("acquire daemon lock: %w", err)
+	}
+	defer releaseInstanceLock(lock)
+	logLine("daemon started interval=%s", interval)
+	for {
+		if err := run(false); err != nil {
+			logLine("daemon iteration error: %v", err)
+		}
+		time.Sleep(interval)
+	}
+}
+
+func openDB() (*sql.DB, error) {
+	return sql.Open("sqlite", "file:"+dbPath+"?_pragma=busy_timeout(5000)")
+}
+
+func getRaw(db *sql.DB, key string) (string, error) {
+	var v string
+	err := db.QueryRow("SELECT value FROM system_config WHERE key=?", key).Scan(&v)
+	return v, err
+}
+
+func str(m map[string]any, keys ...string) string {
+	for _, k := range keys {
+		if v, ok := m[k]; ok && v != nil {
+			return fmt.Sprint(v)
+		}
+	}
+	return ""
+}
+func candidates(db *sql.DB) ([]Candidate, error) {
+	sr, err := db.Query("SELECT id FROM subscriptions ORDER BY sort,id")
+	if err != nil {
+		return nil, err
+	}
+	subOrd := map[int]int{}
+	n := 0
+	for sr.Next() {
+		var id int
+		if err := sr.Scan(&id); err != nil {
+			sr.Close()
+			return nil, err
+		}
+		subOrd[id] = n
+		n++
+	}
+	sr.Close()
+
+	rows, err := db.Query("SELECT sub_id,sort,config_json FROM servers WHERE type='subscription_server' ORDER BY sub_id,sort,id")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []Candidate
+	for rows.Next() {
+		var subID sql.NullInt64
+		var s int
+		var raw string
+		if err := rows.Scan(&subID, &s, &raw); err != nil {
+			return nil, err
+		}
+		var root map[string]any
+		if json.Unmarshal([]byte(raw), &root) != nil {
+			continue
+		}
+		obj := root
+		if x, ok := root["serverObj"].(map[string]any); ok {
+			obj = x
+		}
+
+		protoName := strings.ToLower(str(obj, "protocol"))
+		network := strings.ToLower(str(obj, "net", "network"))
+		security := strings.ToLower(str(obj, "tls", "security"))
+		name := str(obj, "ps", "name", "remarks")
+		priority := 999
+		if protoName == "vless" && network == "tcp" && security == "reality" {
+			priority = 100 + s
+		} else if protoName == "vless" && network == "xhttp" && security == "reality" {
+			// Secondary subscription: modern XHTTP + Reality nodes.
+			// Keep them behind the explicitly preferred TCP + Reality nodes,
+			// but ahead of generic legacy fallbacks.
+			priority = 40 + s
+		} else if protoName == "hysteria2" {
+			priority = 20 + s
+		} else if protoName == "shadowsocks" {
+			priority = 60 + s
+		} else if protoName == "vless" && network == "ws" && security == "tls" {
+			// Secondary subscription CDN/whitelist fallback nodes.
+			priority = 80 + s
+		} else {
+			continue
+		}
+
+		sub := 0
+		actualSubID := 0
+		if subID.Valid {
+			actualSubID = int(subID.Int64)
+			sub = subOrd[actualSubID]
+		}
+		out = append(out, Candidate{
+			TouchID: s + 1, Sub: sub, SubscriptionID: actualSubID,
+			Priority: priority, Sort: s, Name: name,
+			Protocol: protoName, Network: network, Security: security,
+		})
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Priority != out[j].Priority {
+			return out[i].Priority < out[j].Priority
+		}
+		return out[i].Sort < out[j].Sort
+	})
+	return out, rows.Err()
+}
+func current(db *sql.DB) (id, sub int, ok bool) {
+	raw, err := getRaw(db, "outbound.proxy:connectedServers")
+	if err != nil {
+		return
+	}
+	var x map[string]any
+	if json.Unmarshal([]byte(raw), &x) != nil {
+		return
+	}
+	arr, yes := x["touches"].([]any)
+	if !yes || len(arr) == 0 {
+		return
+	}
+	m, yes := arr[0].(map[string]any)
+	if !yes {
+		return
+	}
+	idf, yes := m["id"].(float64)
+	if !yes {
+		return
+	}
+	id = int(idf)
+	if v, yes := m["sub"].(float64); yes {
+		sub = int(v)
+	}
+	ok = true
+	return
+}
+
+func loadControl() Control {
+	c := Control{Mode: "auto", FailurePolicy: "failopen"}
+	b, err := os.ReadFile(controlPath)
+	if err == nil {
+		_ = json.Unmarshal(b, &c)
+	}
+	if c.Mode == "" {
+		c.Mode = "auto"
+	}
+	if c.FailurePolicy == "" {
+		c.FailurePolicy = "failopen"
+	}
+	return c
+}
+
+func loadState() State {
+	var s State
+	if b, err := os.ReadFile(statePath); err == nil {
+		_ = json.Unmarshal(b, &s)
+	}
+	if s.Failures == 0 {
+		if b, err := os.ReadFile(legacyFailuresPath); err == nil {
+			fmt.Sscanf(strings.TrimSpace(string(b)), "%d", &s.Failures)
+		}
+	}
+	if s.Nodes == nil {
+		s.Nodes = map[string]NodeStats{}
+	}
+	return s
+}
+func saveState(s State) {
+	s.LastCheck = time.Now().Unix()
+	b, _ := json.Marshal(s)
+	tmp := statePath + ".new"
+	_ = os.WriteFile(tmp, b, 0600)
+	_ = os.Rename(tmp, statePath)
+	_ = os.WriteFile(legacyFailuresPath, []byte(fmt.Sprintf("%d\n", s.Failures)), 0600)
+}
+
+func candidateKey(c Candidate) string {
+	return fmt.Sprintf("%d:%d", c.SubscriptionID, c.TouchID)
+}
+
+func averageLatency(h HealthResult) float64 {
+	var sum int64
+	n := 0
+	for _, p := range h.Results {
+		if p.Code > 0 && p.Code < 500 {
+			sum += p.MS
+			n++
+		}
+	}
+	if n == 0 {
+		return 0
+	}
+	return float64(sum) / float64(n)
+}
+
+func cooldownDuration(consecutive int) time.Duration {
+	if consecutive < 1 {
+		consecutive = 1
+	}
+	mins := 5 << min(consecutive-1, 3)
+	if mins > 30 {
+		mins = 30
+	}
+	return time.Duration(mins) * time.Minute
+}
+
+func markCandidateFailure(s *State, c Candidate) {
+	if s.Nodes == nil {
+		s.Nodes = map[string]NodeStats{}
+	}
+	k := candidateKey(c)
+	st := s.Nodes[k]
+	st.Failures++
+	st.ConsecutiveFailures++
+	st.LastFailure = time.Now().Unix()
+	st.CooldownUntil = time.Now().Add(cooldownDuration(st.ConsecutiveFailures)).Unix()
+	s.Nodes[k] = st
+}
+
+func markCandidateSuccess(s *State, c Candidate, h HealthResult) {
+	if s.Nodes == nil {
+		s.Nodes = map[string]NodeStats{}
+	}
+	k := candidateKey(c)
+	st := s.Nodes[k]
+	st.Successes++
+	st.ConsecutiveFailures = 0
+	st.LastSuccess = time.Now().Unix()
+	st.CooldownUntil = 0
+	lat := averageLatency(h)
+	if lat > 0 {
+		if st.EWMALatencyMS == 0 {
+			st.EWMALatencyMS = lat
+		} else {
+			st.EWMALatencyMS = st.EWMALatencyMS*0.7 + lat*0.3
+		}
+	}
+	s.Nodes[k] = st
+}
+
+func candidateScore(c Candidate, st NodeStats) float64 {
+	score := float64(c.Priority)
+	if st.EWMALatencyMS > 0 {
+		score += st.EWMALatencyMS / 100.0
+	}
+	score += float64(st.ConsecutiveFailures) * 25
+	bonus := st.Successes
+	if bonus > 5 {
+		bonus = 5
+	}
+	score -= float64(bonus) * 0.4
+	return score
+}
+
+func rankCandidates(cs []Candidate, s State, activeID, activeSub int) ([]RankedCandidate, []RankedCandidate) {
+	now := time.Now().Unix()
+	ready := make([]RankedCandidate, 0, len(cs))
+	cooling := make([]RankedCandidate, 0)
+	for _, c := range cs {
+		if c.TouchID == activeID && c.Sub == activeSub {
+			continue
+		}
+		st := s.Nodes[candidateKey(c)]
+		r := RankedCandidate{Candidate: c, Score: candidateScore(c, st), CooldownUntil: st.CooldownUntil, Cooling: st.CooldownUntil > now}
+		if r.Cooling {
+			cooling = append(cooling, r)
+		} else {
+			ready = append(ready, r)
+		}
+	}
+	sort.SliceStable(ready, func(i, j int) bool {
+		if ready[i].Score != ready[j].Score {
+			return ready[i].Score < ready[j].Score
+		}
+		return ready[i].Priority < ready[j].Priority
+	})
+	sort.SliceStable(cooling, func(i, j int) bool {
+		if cooling[i].CooldownUntil != cooling[j].CooldownUntil {
+			return cooling[i].CooldownUntil < cooling[j].CooldownUntil
+		}
+		return cooling[i].Score < cooling[j].Score
+	})
+	return ready, cooling
+}
+
+func dashboardEventType(msg string) string {
+	switch {
+	case strings.Contains(msg, "health confirmation failed"):
+		return "outage"
+	case strings.Contains(msg, "health failed ("),
+		strings.Contains(msg, "health degraded:"):
+		return "health"
+	case strings.Contains(msg, "recovered on confirmation"),
+		strings.Contains(msg, "health recovered:"):
+		return "recovery"
+	case strings.Contains(msg, "candidate unhealthy"),
+		strings.Contains(msg, "active node cooldown"):
+		return "health"
+	case strings.Contains(msg, "switched successfully id="):
+		return "switch"
+	case strings.Contains(msg, "trying id="),
+		strings.Contains(msg, "emergency retry cooling node"),
+		strings.Contains(msg, "switch failed id="):
+		return "switch_attempt"
+	case strings.Contains(msg, "no healthy backend node found"),
+		strings.Contains(msg, "pinned mode: backend unhealthy"):
+		return "outage"
+	case strings.Contains(msg, "backend listener missing"),
+		strings.Contains(msg, "backend listener unavailable"):
+		return "backend"
+	case strings.Contains(msg, "policy runtime ->"):
+		return "policy"
+	default:
+		return ""
+	}
+}
+
+func appendDashboardEvent(msg string) {
+	typ := dashboardEventType(msg)
+	if typ == "" {
+		return
+	}
+	clean := strings.NewReplacer("\t", " ", "\r", " ", "\n", " ").Replace(msg)
+	line := fmt.Sprintf("%d\t%s\t%s\n", time.Now().Unix(), typ, clean)
+	f, err := os.OpenFile(eventPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+	if err == nil {
+		_, _ = f.WriteString(line)
+		_ = f.Close()
+	}
+	if st, err := os.Stat(eventPath); err == nil && st.Size() > 512*1024 {
+		if b, err := os.ReadFile(eventPath); err == nil {
+			lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+			if len(lines) > 500 {
+				lines = lines[len(lines)-500:]
+			}
+			_ = os.WriteFile(eventPath, []byte(strings.Join(lines, "\n")+"\n"), 0600)
+		}
+	}
+}
+
+func logLine(format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
+	fmt.Println(msg)
+	_ = exec.Command("logger", "-t", tag, msg).Run()
+	appendDashboardEvent(msg)
+}
+
+func signLocalJWT(db *sql.DB) (string, error) {
+	raw, err := getRaw(db, "system:jwtSecret")
+	if err != nil {
+		return "", err
+	}
+	var secretHex string
+	if err := json.Unmarshal([]byte(raw), &secretHex); err != nil {
+		return "", err
+	}
+	secret, err := hex.DecodeString(secretHex)
+	if err != nil || len(secret) == 0 {
+		return "", errors.New("invalid local JWT secret")
+	}
+
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
+	payloadBytes, _ := json.Marshal(map[string]any{
+		"uname": "vpn-backend-watchdog",
+		"exp":   time.Now().Add(10 * time.Minute).Unix(),
+	})
+	payload := base64.RawURLEncoding.EncodeToString(payloadBytes)
+	unsigned := header + "." + payload
+	mac := hmac.New(sha256.New, secret)
+	_, _ = mac.Write([]byte(unsigned))
+	return unsigned + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil)), nil
+}
+func apiCall(method, path string, payload any, timeout time.Duration) (map[string]any, error) {
+	db, err := openDB()
+	if err != nil {
+		return nil, err
+	}
+	token, err := signLocalJWT(db)
+	db.Close()
+	if err != nil {
+		return nil, err
+	}
+
+	var body io.Reader
+	if payload != nil {
+		b, err := json.Marshal(payload)
+		if err != nil {
+			return nil, err
+		}
+		body = bytes.NewReader(b)
+	}
+	req, err := http.NewRequest(method, "http://127.0.0.1:2017/api/"+path, body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", token)
+	if payload != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+
+	resp, err := (&http.Client{Timeout: timeout}).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	var env map[string]any
+	if err := json.Unmarshal(b, &env); err != nil {
+		return nil, fmt.Errorf("invalid API JSON: HTTP %d", resp.StatusCode)
+	}
+	if resp.StatusCode >= 400 || fmt.Sprint(env["code"]) != "SUCCESS" {
+		return nil, fmt.Errorf("API %s %s failed: HTTP %d code=%v message=%v",
+			method, path, resp.StatusCode, env["code"], env["message"])
+	}
+	return env, nil
+}
+func setCandidate(c Candidate) error {
+	body := map[string]any{
+		"outbound": "proxy",
+		"touches": []any{map[string]any{
+			"_type":    "subscriptionServer",
+			"id":       c.TouchID,
+			"sub":      c.Sub,
+			"outbound": "proxy",
+		}},
+	}
+	if _, err := apiCall(http.MethodPut, "outboundConnections", body, 10*time.Second); err != nil {
+		return err
+	}
+	deadline := time.Now().Add(8 * time.Second)
+	for time.Now().Before(deadline) {
+		if listenerReady() {
+			db, err := openDB()
+			if err == nil {
+				id, sub, ok := current(db)
+				db.Close()
+				if ok && id == c.TouchID && sub == c.Sub {
+					return nil
+				}
+			}
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return fmt.Errorf("v2rayA did not settle on %s id=%d sub=%d", c.Name, c.TouchID, c.Sub)
+}
+
+func listenerReady() bool {
+	conn, err := net.DialTimeout("tcp", proxyAddr, 300*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
+}
+
+func ensureBackend() bool {
+	if listenerReady() {
+		return true
+	}
+	logLine("backend listener missing; starting v2rayA")
+	_ = exec.Command("/etc/init.d/v2raya", "start").Run()
+	deadline := time.Now().Add(6 * time.Second)
+	for time.Now().Before(deadline) {
+		if listenerReady() {
+			return true
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	return false
+}
+func health(timeout time.Duration) HealthResult {
+	targets := []struct{ Name, URL string }{
+		{"google", "https://connectivitycheck.gstatic.com/generate_204"},
+		{"cloudflare", "https://cp.cloudflare.com/generate_204"},
+		{"apple", "https://captive.apple.com/hotspot-detect.html"},
+		{"firefox", "https://detectportal.firefox.com/canonical.html"},
+	}
+	result := HealthResult{Status: "down", Total: len(targets), Results: make([]ProbeResult, len(targets))}
+
+	base := &net.Dialer{Timeout: 2500 * time.Millisecond}
+	socks, err := proxy.SOCKS5("tcp", proxyAddr, nil, base)
+	if err != nil {
+		for i, t := range targets {
+			result.Results[i] = ProbeResult{Name: t.Name, URL: t.URL, Error: err.Error()}
+		}
+		return result
+	}
+	tr := &http.Transport{
+		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+			type dialResult struct {
+				c   net.Conn
+				err error
+			}
+			ch := make(chan dialResult, 1)
+			go func() { c, e := socks.Dial(network, address); ch <- dialResult{c, e} }()
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case r := <-ch:
+				return r.c, r.err
+			}
+		},
+		TLSHandshakeTimeout: 4 * time.Second,
+		ForceAttemptHTTP2:   true,
+	}
+	defer tr.CloseIdleConnections()
+	client := &http.Client{Transport: tr, Timeout: timeout}
+	var wg sync.WaitGroup
+	for i, t := range targets {
+		i, t := i, t
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			start := time.Now()
+			p := ProbeResult{Name: t.Name, URL: t.URL}
+			ctx, cancel := context.WithTimeout(context.Background(), timeout)
+			defer cancel()
+			req, _ := http.NewRequestWithContext(ctx, http.MethodGet, t.URL, nil)
+			resp, err := client.Do(req)
+			p.MS = time.Since(start).Milliseconds()
+			if err != nil {
+				p.Error = err.Error()
+				result.Results[i] = p
+				return
+			}
+			p.Code = resp.StatusCode
+			_, _ = io.CopyN(io.Discard, resp.Body, 1024)
+			_ = resp.Body.Close()
+			result.Results[i] = p
+		}()
+	}
+	wg.Wait()
+	for _, p := range result.Results {
+		if p.Code > 0 && p.Code < 500 {
+			result.Passed++
+		}
+	}
+	switch {
+	case result.Passed >= 3:
+		result.Status = "healthy"
+		result.Healthy = true
+	case result.Passed == 2:
+		result.Status = "degraded"
+		result.Healthy = true
+	default:
+		result.Status = "down"
+		result.Healthy = false
+	}
+	return result
+}
+
+func healthSummary(h HealthResult) string {
+	parts := []string{fmt.Sprintf("status=%s passed=%d/%d", h.Status, h.Passed, h.Total)}
+	for _, p := range h.Results {
+		if p.Code > 0 && p.Code < 500 {
+			parts = append(parts, fmt.Sprintf("%s=%d/%dms", p.Name, p.Code, p.MS))
+			continue
+		}
+		err := p.Error
+		if len(err) > 80 {
+			err = err[:80]
+		}
+		if err == "" {
+			err = fmt.Sprintf("http=%d", p.Code)
+		}
+		parts = append(parts, fmt.Sprintf("%s=FAIL/%dms(%s)", p.Name, p.MS, err))
+	}
+	return strings.Join(parts, " ")
+}
+
+func healthNow() HealthResult { return health(5 * time.Second) }
+func healthyNow() bool        { return healthNow().Healthy }
+func readTrimmed(path string) string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
+}
+
+func desiredPolicyRuntime(ctrl Control, _ bool) string {
+	if ctrl.Mode == "direct" {
+		return "direct"
+	}
+	if ctrl.FailurePolicy == "killswitch" {
+		// Keep the proxy class routed only through the VPN backend even while
+		// health is degraded. A dead/unhealthy SOCKS backend fails closed by
+		// itself because vpn-policy has no direct fallback in killswitch mode.
+		// killswitch-blocked is reserved for explicit emergency/invariant use.
+		return "killswitch"
+	}
+	return "failopen"
+}
+
+func syncPolicyRuntime(ctrl Control, backendHealthy bool) error {
+	want := desiredPolicyRuntime(ctrl, backendHealthy)
+	if readTrimmed(policyRuntimePath) == want {
+		return nil
+	}
+	out, err := exec.Command("/usr/bin/vpn-policy-mode", want).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("apply policy runtime %s: %w: %s", want, err, strings.TrimSpace(string(out)))
+	}
+	logLine("policy runtime -> %s", want)
+	return nil
+}
+
+func findCandidate(cs []Candidate, id, sub int) (Candidate, bool) {
+	for _, c := range cs {
+		if c.TouchID == id && c.Sub == sub {
+			return c, true
+		}
+	}
+	return Candidate{}, false
+}
+
+func run(logHealthy bool) error {
+	s := loadState()
+	wasUnhealthy := s.Failures > 0 || s.LastError != ""
+	ctrl := loadControl()
+
+	if !listenerReady() {
+		if err := syncPolicyRuntime(ctrl, false); err != nil {
+			logLine("policy sync before backend recovery failed: %v", err)
+		}
+	}
+	if !ensureBackend() {
+		s.Failures++
+		s.LastFailure = time.Now().Unix()
+		s.LastError = "backend listener unavailable after start attempt"
+		saveState(s)
+		return errors.New(s.LastError)
+	}
+
+	db, err := openDB()
+	if err != nil {
+		return err
+	}
+	cs, err := candidates(db)
+	if err != nil {
+		db.Close()
+		return err
+	}
+	activeID, activeSub, _ := current(db)
+	db.Close()
+	active, activeKnown := findCandidate(cs, activeID, activeSub)
+
+	previousHealthStatus := s.LastHealth.Status
+	h := healthNow()
+	s.LastHealth = h
+	if h.Healthy {
+		if err := syncPolicyRuntime(ctrl, true); err != nil {
+			return err
+		}
+		s.Failures = 0
+		s.LastHealthy = time.Now().Unix()
+		s.LastError = ""
+		if activeKnown {
+			markCandidateSuccess(&s, active, h)
+		}
+		if h.Status == "degraded" && previousHealthStatus != "degraded" {
+			logLine("health degraded: %s", healthSummary(h))
+		} else if h.Status == "healthy" && previousHealthStatus == "degraded" {
+			logLine("health recovered: %s", healthSummary(h))
+		}
+		saveState(s)
+		if logHealthy || wasUnhealthy {
+			logLine("health %s", healthSummary(h))
+		}
+		return nil
+	}
+
+	s.Failures++
+	s.LastFailure = time.Now().Unix()
+	s.LastError = "health failed"
+	if err := syncPolicyRuntime(ctrl, false); err != nil {
+		logLine("policy sync on health failure failed: %v", err)
+	}
+	saveState(s)
+	logLine("health failed (%d/2): %s", s.Failures, healthSummary(h))
+
+	if s.Failures < 2 {
+		time.Sleep(8 * time.Second)
+		h = healthNow()
+		s.LastHealth = h
+		if h.Healthy {
+			if err := syncPolicyRuntime(ctrl, true); err != nil {
+				return err
+			}
+			s.Failures = 0
+			s.LastHealthy = time.Now().Unix()
+			s.LastError = ""
+			if activeKnown {
+				markCandidateSuccess(&s, active, h)
+			}
+			saveState(s)
+			logLine("recovered on confirmation: %s", healthSummary(h))
+			return nil
+		}
+		s.Failures = 2
+		if activeKnown {
+			markCandidateFailure(&s, active)
+			st := s.Nodes[candidateKey(active)]
+			logLine("active node cooldown until %d after %d consecutive failures: %s", st.CooldownUntil, st.ConsecutiveFailures, active.Name)
+		}
+		saveState(s)
+		logLine("health confirmation failed (2/2): %s", healthSummary(h))
+	}
+
+	if ctrl.Mode == "pinned" {
+		s.Failures = 0
+		s.LastError = "pinned node unhealthy; auto-switch suppressed"
+		saveState(s)
+		logLine("pinned mode: backend unhealthy, automatic node switch suppressed")
+		return nil
+	}
+
+	ready, cooling := rankCandidates(cs, s, activeID, activeSub)
+	try := func(r RankedCandidate, emergency bool) bool {
+		if emergency {
+			logLine("emergency retry cooling node id=%d sub=%d score=%.2f cooldownUntil=%d %s", r.TouchID, r.Sub, r.Score, r.CooldownUntil, r.Name)
+		} else {
+			logLine("trying id=%d sub=%d score=%.2f %s", r.TouchID, r.Sub, r.Score, r.Name)
+		}
+		if err := setCandidate(r.Candidate); err != nil {
+			markCandidateFailure(&s, r.Candidate)
+			saveState(s)
+			logLine("switch failed id=%d sub=%d: %v", r.TouchID, r.Sub, err)
+			return false
+		}
+		h := healthNow()
+		s.LastHealth = h
+		if !h.Healthy {
+			markCandidateFailure(&s, r.Candidate)
+			saveState(s)
+			st := s.Nodes[candidateKey(r.Candidate)]
+			logLine("candidate unhealthy id=%d sub=%d; cooldown until %d: %s", r.TouchID, r.Sub, st.CooldownUntil, healthSummary(h))
+			return false
+		}
+		if err := syncPolicyRuntime(ctrl, true); err != nil {
+			logLine("policy restore after healthy switch failed: %v", err)
+			return false
+		}
+		markCandidateSuccess(&s, r.Candidate, h)
+		s.Failures = 0
+		s.LastHealthy = time.Now().Unix()
+		s.LastSwitch = time.Now().Unix()
+		s.LastNode = r.Name
+		s.LastError = ""
+		saveState(s)
+		logLine("switched successfully id=%d sub=%d score=%.2f %s", r.TouchID, r.Sub, r.Score, r.Name)
+		return true
+	}
+
+	for _, r := range ready {
+		if try(r, false) {
+			return nil
+		}
+	}
+	if len(cooling) > 0 {
+		if try(cooling[0], true) {
+			return nil
+		}
+	}
+
+	s.Failures = 0
+	s.LastError = "no healthy backend node found"
+	saveState(s)
+	logLine("no healthy backend node found")
+	return nil
+}
+
+func inspect() error {
+	db, err := openDB()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	cs, err := candidates(db)
+	if err != nil {
+		return err
+	}
+	activeID, activeSub, _ := current(db)
+	state := loadState()
+	ready, cooling := rankCandidates(cs, state, activeID, activeSub)
+	out := struct {
+		Control  Control           `json:"control"`
+		State    State             `json:"state"`
+		Listener bool              `json:"listener"`
+		Active   map[string]int    `json:"active"`
+		Ready    []RankedCandidate `json:"ready"`
+		Cooling  []RankedCandidate `json:"cooling"`
+	}{
+		Control: loadControl(), State: state, Listener: listenerReady(),
+		Active: map[string]int{"id": activeID, "sub": activeSub},
+		Ready:  ready, Cooling: cooling,
+	}
+	return json.NewEncoder(os.Stdout).Encode(out)
+}
+
+// Run executes the production watchdog command using legacy-compatible flags.
+func Run(args []string) {
+	oldArgs := os.Args
+	oldFlags := flag.CommandLine
+	flag.CommandLine = flag.NewFlagSet("vpn-guardian watchdog", flag.ExitOnError)
+	os.Args = append([]string{"vpn-backend-watchdog"}, args...)
+	defer func() {
+		os.Args = oldArgs
+		flag.CommandLine = oldFlags
+	}()
+	main()
+}

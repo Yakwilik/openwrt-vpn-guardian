@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "homeIp": "203.0.113.10",
+  "lanInterface": "br-lan",
+  "lanCidr": "192.168.8.0/24",
+  "wanInterface": "eth1",
+  "assetsDir": "/usr/share/xray",
+  "front": {
+    "socksPort": 20174,
+    "tproxyPort": 52346,
+    "policyPort": 20177,
+    "mark": 192,
+    "routeTable": 101,
+    "directSocketMark": 128
+  },
+  "backend": {
+    "socksPort": 20173,
+    "watchdogInterval": "10s"
+  },
+  "dashboard": {
+    "collectorInterval": "3s"
+  },
+  "policy": {
+    "default": "killswitch",
+    "probeUrl": "https://connectivitycheck.gstatic.com/generate_204",
+    "probeInterval": "5s"
+  },
+  "bypass4": [
+    "0.0.0.0/8",
+    "10.0.0.0/8",
+    "100.64.0.0/10",
+    "127.0.0.0/8",
+    "169.254.0.0/16",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+    "224.0.0.0/3"
+  ]
+}

@@ -1,0 +1,7 @@
+/dist/
+/vpn-guardian
+*.ipk
+*.apk
+*.tar.gz
+.DS_Store
+.idea/
