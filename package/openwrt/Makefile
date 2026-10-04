@@ -24,7 +24,7 @@ define Package/vpn-guardian
   CATEGORY:=Network
   SUBMENU:=VPN
   TITLE:=Selective VPN control plane for v2rayA
-  DEPENDS:=$(GO_ARCH_DEPENDS) +v2raya +xray-core +ca-bundle +ip-full +nftables +nginx-ssl +fcgi
+  DEPENDS:=$(GO_ARCH_DEPENDS) +v2raya +xray-core +v2ray-geosite +v2ray-geoip +ca-bundle +ip-full +nftables +nginx-ssl +fcgi
 endef
 define Package/vpn-guardian/description
  Selective VPN routing, health monitoring and automatic v2rayA failover.
