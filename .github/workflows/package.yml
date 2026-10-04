@@ -67,6 +67,26 @@ jobs:
           find /tmp/openwrt-sdk/bin -type f -name 'vpn-guardian_*.ipk' -exec cp -v {} dist/ \;
           test -n "$(find dist -type f -name 'vpn-guardian_*.ipk' -print -quit)"
 
+      - name: Verify packaged binary is CGO-free and static
+        shell: bash
+        run: |
+          set -euo pipefail
+          ipk="$(find dist -type f -name 'vpn-guardian_*.ipk' -print -quit)"
+          rm -rf /tmp/vpn-guardian-ipk-check
+          mkdir -p /tmp/vpn-guardian-ipk-check
+          cd /tmp/vpn-guardian-ipk-check
+          ar x "$GITHUB_WORKSPACE/$ipk"
+          data="$(find . -maxdepth 1 -type f -name 'data.tar.*' -print -quit)"
+          test -n "$data"
+          tar -xf "$data"
+          test -x usr/bin/vpn-guardian
+          file usr/bin/vpn-guardian
+          file usr/bin/vpn-guardian | grep -q "statically linked"
+          if readelf -d usr/bin/vpn-guardian 2>/dev/null | grep -q NEEDED; then
+            echo "vpn-guardian unexpectedly has dynamic dependencies" >&2
+            exit 1
+          fi
+
       - uses: actions/upload-artifact@v4
         with:
           name: vpn-guardian-openwrt-24.10.4-filogic

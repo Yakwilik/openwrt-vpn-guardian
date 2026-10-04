@@ -81,7 +81,7 @@ Bootstrap:
 3. Validates generated Xray and nftables configuration before activation.
 4. Enables v2rayA and converts it to backend-only mode (transparent=close).
 5. Configures local vpn.home.arpa DNS.
-6. Enables fcgiwrap and reloads the dashboard nginx virtual host.
+6. Starts the loopback-only native dashboard API service and reloads the nginx virtual host.
 7. Generates the front, policy, policy-routing, watchdog and collector configuration.
 8. Creates a pre-apply backup.
 9. Activates the stack and runs the complete self-test.
@@ -113,13 +113,15 @@ A package install is intended to be enough:
 opkg install vpn-guardian_*.ipk
 ~~~
 
-The post-install hook starts the safe bootstrap service automatically.
+The post-install hook starts the safe bootstrap service automatically. The package also migrates the legacy dashboard nginx virtual host out of the active config and preserves the legacy control CGI only when it is needed for PIN/session migration.
+
+The Go binary is built with CGO disabled and internal linking. Dependencies are pinned to versions that build with Go 1.23.12, matching the OpenWrt 24.10 package feed. CGO-free builds are supported on 386, amd64, arm, arm64 and riscv64; MIPS/MIPS64 targets are deliberately excluded because modernc/sqlite does not support them in this configuration.
 
 ## Build the Go binary
 
 ~~~sh
-go test ./...
-CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -o vpn-guardian ./cmd/vpn-guardian
+GOTOOLCHAIN=go1.23.12 go test ./...
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 GOTOOLCHAIN=go1.23.12 go build -trimpath -o vpn-guardian ./cmd/vpn-guardian
 ~~~
 
 ## Configuration
@@ -147,6 +149,6 @@ Every apply creates a backup first. A failed restart, self-test or service-enabl
 
 The unified binary, collector, status/history/control API, bootstrap logic and OpenWrt package layout are implemented in the repository.
 
-The remaining work before a tagged release is package-build validation, controlled installation on the reference GL-MT6000, cleanup of duplicated v2rayA parsing/client code, and broader tests.
+The remaining work before a tagged release is OpenWrt SDK package validation, controlled installation on the reference GL-MT6000, reboot/upgrade testing, and broader tests.
 
 See docs/architecture.md and docs/migration.md.

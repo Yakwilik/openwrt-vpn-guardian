@@ -20,11 +20,12 @@ import (
 )
 
 const (
-	stackDir        = "/etc/vpn-stack"
-	stackPath       = stackDir + "/stack.json"
-	routingPath     = stackDir + "/routing.json"
-	backupDir       = stackDir + "/backups"
-	bootstrapMarker = stackDir + "/bootstrap-complete"
+	stackDir                = "/etc/vpn-stack"
+	stackPath               = stackDir + "/stack.json"
+	routingPath             = stackDir + "/routing.json"
+	backupDir               = stackDir + "/backups"
+	bootstrapMarker         = stackDir + "/bootstrap-complete"
+	defaultDashboardAPIAddr = "127.0.0.1:20175"
 )
 
 type Stack struct {
@@ -234,7 +235,7 @@ func bootstrapCmd(dryRun bool) error {
 }
 
 func checkBootstrapDependencies() error {
-	required := []string{"xray", "v2raya", "nginx", "fcgiwrap", "nft", "ip", "uci", "ubus"}
+	required := []string{"xray", "v2raya", "nginx", "nft", "ip", "uci", "ubus"}
 	var missing []string
 	for _, name := range required {
 		if _, err := exec.LookPath(name); err != nil {
@@ -324,14 +325,28 @@ func setupDashboardDNS() error {
 }
 
 func setupDashboardRuntime() error {
-	if out, err := run("/etc/init.d/fcgiwrap", "enable"); err != nil {
-		return fmt.Errorf("enable fcgiwrap: %v: %s", err, out)
+	if out, err := run("/etc/init.d/vpn-guardian-api", "enable"); err != nil {
+		return fmt.Errorf("enable vpn-guardian-api: %v: %s", err, out)
 	}
-	if !serviceRunning("fcgiwrap") {
-		if out, err := run("/etc/init.d/fcgiwrap", "start"); err != nil {
-			return fmt.Errorf("start fcgiwrap: %v: %s", err, out)
+	if out, err := run("/etc/init.d/vpn-guardian-api", "restart"); err != nil {
+		return fmt.Errorf("start vpn-guardian-api: %v: %s", err, out)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	apiReady := false
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", defaultDashboardAPIAddr, 300*time.Millisecond)
+		if err == nil {
+			_ = conn.Close()
+			apiReady = true
+			break
 		}
+		time.Sleep(100 * time.Millisecond)
 	}
+	if !apiReady {
+		return fmt.Errorf("vpn-guardian-api did not listen on %s", defaultDashboardAPIAddr)
+	}
+
 	if out, err := run("nginx", "-t", "-c", "/etc/nginx/nginx.conf"); err != nil {
 		return fmt.Errorf("nginx config invalid: %v: %s", err, out)
 	}
@@ -934,11 +949,15 @@ var backupFiles = []string{
 	"/etc/vpn-policy-runtime",
 	"/etc/v2raya-failover-control.json",
 	"/etc/v2raya/v2raya.db",
+	"/etc/vpn-dashboard-auth.json",
+	"/etc/nginx/conf.d/vpn-guardian.conf",
 	"/etc/init.d/vpn-front",
 	"/etc/init.d/vpn-policy",
 	"/etc/init.d/vpn-front-routing",
 	"/etc/init.d/vpn-backend-watchdog",
 	"/etc/init.d/vpn-dashboard-collector",
+	"/etc/init.d/vpn-guardian-api",
+	"/etc/init.d/vpn-guardian-bootstrap",
 	"/etc/hotplug.d/iface/99-vpn-front-routing",
 	"/usr/bin/vpn-policy-mode",
 	"/usr/bin/vpn-guardian",
@@ -948,8 +967,10 @@ var backupFiles = []string{
 	"/usr/bin/vpn-stack",
 	"/www/cgi-bin/vpn-status",
 	"/www/cgi-bin/vpn-control",
+	"/www/cgi-bin/vpn-control.legacy",
 	"/www/cgi-bin/vpn-history",
 	"/www/vpn-dashboard/index.html",
+	"/etc/vpn-stack/legacy/vpn-dashboard.conf",
 }
 
 func backup(reason string) (string, error) {
@@ -966,7 +987,7 @@ func backup(reason string) (string, error) {
 	tw := tar.NewWriter(gz)
 
 	for _, p := range backupFiles {
-		info, err := os.Stat(p)
+		info, err := os.Lstat(p)
 		if err != nil {
 			if os.IsNotExist(err) {
 				continue
@@ -976,7 +997,17 @@ func backup(reason string) (string, error) {
 			f.Close()
 			return "", err
 		}
-		h, err := tar.FileInfoHeader(info, "")
+		linkTarget := ""
+		if info.Mode()&os.ModeSymlink != 0 {
+			linkTarget, err = os.Readlink(p)
+			if err != nil {
+				tw.Close()
+				gz.Close()
+				f.Close()
+				return "", err
+			}
+		}
+		h, err := tar.FileInfoHeader(info, linkTarget)
 		if err != nil {
 			tw.Close()
 			gz.Close()
@@ -1116,23 +1147,41 @@ func extractArchive(path, dir string) error {
 		if !strings.HasPrefix(dst, dir+string(os.PathSeparator)) {
 			return errors.New("archive traversal")
 		}
-		if h.FileInfo().IsDir() {
+		switch h.Typeflag {
+		case tar.TypeDir:
 			if err := os.MkdirAll(dst, h.FileInfo().Mode()); err != nil {
 				return err
 			}
-			continue
-		}
-		if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
-			return err
-		}
-		out, err := os.OpenFile(dst, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, h.FileInfo().Mode())
-		if err != nil {
-			return err
-		}
-		_, cpErr := io.Copy(out, tr)
-		out.Close()
-		if cpErr != nil {
-			return cpErr
+		case tar.TypeSymlink:
+			if filepath.IsAbs(h.Linkname) {
+				return fmt.Errorf("unsafe absolute symlink target %q", h.Linkname)
+			}
+			if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+				return err
+			}
+			resolved := filepath.Clean(filepath.Join(filepath.Dir(dst), h.Linkname))
+			if resolved != dir && !strings.HasPrefix(resolved, dir+string(os.PathSeparator)) {
+				return fmt.Errorf("unsafe symlink target %q", h.Linkname)
+			}
+			_ = os.Remove(dst)
+			if err := os.Symlink(h.Linkname, dst); err != nil {
+				return err
+			}
+		case tar.TypeReg, tar.TypeRegA:
+			if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+				return err
+			}
+			out, err := os.OpenFile(dst, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, h.FileInfo().Mode())
+			if err != nil {
+				return err
+			}
+			_, cpErr := io.Copy(out, tr)
+			out.Close()
+			if cpErr != nil {
+				return cpErr
+			}
+		default:
+			return fmt.Errorf("unsupported archive entry type %d for %s", h.Typeflag, h.Name)
 		}
 	}
 	return nil
@@ -1154,6 +1203,22 @@ func installExtracted(dir string) error {
 		info, err := de.Info()
 		if err != nil {
 			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			target, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+				return err
+			}
+			tmp := dst + ".vpn-stack-new"
+			_ = os.Remove(tmp)
+			if err := os.Symlink(target, tmp); err != nil {
+				return err
+			}
+			_ = os.Remove(dst)
+			return os.Rename(tmp, dst)
 		}
 		return copyAtomic(path, dst, info.Mode())
 	})

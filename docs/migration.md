@@ -24,7 +24,7 @@ Implemented:
 - generated Xray front/policy configuration.
 - generated nftables and policy-routing configuration.
 - automatic v2rayA backend-only mode.
-- automatic dashboard DNS and nginx/fcgiwrap setup.
+- automatic dashboard DNS plus a loopback-only native HTTP API service behind nginx.
 - backend-aware activation: front is not enabled until the v2rayA SOCKS backend is ready.
 - bootstrap --dry-run preflight.
 - automatic retry through vpn-guardian-bootstrap.
@@ -36,13 +36,16 @@ Implemented in the package recipe:
 
 - one executable at /usr/bin/vpn-guardian.
 - compatibility command symlinks.
-- status/history/control CGI symlinks.
-- vpn-front and vpn-policy init scripts.
+- compatibility CGI symlinks for migration; nginx uses the native API service.
+- vpn-front, vpn-policy and vpn-guardian-api init scripts.
 - first-run bootstrap init service.
 - dashboard assets and nginx configuration.
 - generic config examples outside /etc.
 - pre-install preservation of the legacy control CGI for PIN/session migration.
-- post-install automatic bootstrap.
+- migration of the old vpn.home.arpa nginx server out of the active config.
+- CGO-free internal-link Go build pinned to Go-1.23-compatible dependencies for OpenWrt 24.10, with explicit exclusion of unsupported MIPS targets.
+- explicit nftables TPROXY/socket kernel dependencies.
+- post-install automatic bootstrap and uninstall cleanup.
 
 Package validation target:
 
@@ -79,6 +82,5 @@ After the package has survived the controlled install and reboot tests:
 
 - remove obsolete standalone binaries.
 - remove obsolete dashboard collector/CGI source copies.
-- move duplicated v2rayA SQLite parsing and API code into a shared internal package.
 - add focused unit tests for candidate eligibility, policy selection, history/event normalization and bootstrap discovery.
 - tag the first package release.

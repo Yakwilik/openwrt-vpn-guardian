@@ -41,6 +41,12 @@ func main() {
 	case "vpn-control":
 		api.ControlCGI()
 		return
+	case "vpn-guardian-api":
+		if err := api.Serve(args); err != nil {
+			fmt.Fprintln(os.Stderr, "vpn-guardian-api:", err)
+			os.Exit(1)
+		}
+		return
 	}
 
 	if len(args) == 0 {
@@ -61,6 +67,11 @@ func main() {
 		collector.Run(args[1:])
 	case "api":
 		api.Run(args[1:])
+	case "api-server":
+		if err := api.Serve(args[1:]); err != nil {
+			fmt.Fprintln(os.Stderr, "vpn-guardian api-server:", err)
+			os.Exit(1)
+		}
 	case "bootstrap", "init", "status", "validate", "apply", "backup", "restore":
 		stack.Run(args)
 	default:
@@ -82,4 +93,5 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  vpn-guardian control [legacy control flags]")
 	fmt.Fprintln(os.Stderr, "  vpn-guardian collector -mode collect -interval 3s")
 	fmt.Fprintln(os.Stderr, "  vpn-guardian api status|history|control")
+	fmt.Fprintln(os.Stderr, "  vpn-guardian api-server [-listen 127.0.0.1:20175]")
 }
