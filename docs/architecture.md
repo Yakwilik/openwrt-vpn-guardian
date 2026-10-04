@@ -2,77 +2,167 @@
 
 ## Design goal
 
-The VPN backend is not allowed to become a single point of failure for ordinary Internet access.
+The VPN backend must never become a single point of failure for ordinary Internet access.
 
-Direct traffic and proxy traffic are separated before the v2rayA backend.
+Direct traffic and proxy-class traffic are separated before v2rayA:
 
 ~~~text
 client
   |
   v
-vpn-front
+vpn-front (Xray)
   |
-  +-- direct class -> freedom outbound -> WAN
+  +-- direct class -> marked freedom outbound -> WAN
   |
   +-- proxy class -> vpn-policy -> 127.0.0.1:20173 -> v2rayA -> VPN
 ~~~
 
-## Front router
+v2rayA is deliberately kept in backend-only mode with its transparent proxy disabled.
 
-*vpn-front* is a stable Xray process. It owns the LAN TPROXY entry point and is not restarted during node failover.
+## vpn-front
 
-The front router classifies configured domains and IP ranges. Everything else uses a marked direct socket and bypasses the VPN backend.
+*vpn-front* is a stable Xray process that owns the LAN TPROXY entry point.
 
-## Policy layer
+The nftables prerouting rule intercepts LAN TCP/UDP traffic and sends it to vpn-front. Private/local destination ranges are bypassed before interception.
 
-*vpn-policy* determines what proxy-class traffic does when the backend is unavailable.
-The public modes are:
+vpn-front classifies traffic using:
 
-- *VPN-only*: proxy traffic remains bound to the VPN backend and cannot fall back to direct.
-- *Fail-open*: proxy traffic may temporarily use direct Internet when the VPN backend is unavailable.
-- *Direct*: explicit operator override; proxy classification remains active but policy sends it direct.
+- geosite domain groups;
+- explicit domain rules;
+- explicit IP ranges.
 
-An internal emergency blackhole configuration is retained for invariant violations. It is not an ordinary response to a slow or degraded VPN.
+Matched proxy traffic goes to vpn-policy. Everything else uses a marked direct Xray freedom socket so it bypasses the TPROXY rule on egress.
 
-## Watchdog
+## vpn-policy
 
-The watchdog checks independent connectivity endpoints through the backend SOCKS listener.
+vpn-policy is a second Xray process listening only on loopback.
 
-Current health states:
+Public policy modes:
 
-- *healthy*: at least 3 of 4 probes succeed.
-- *degraded*: 2 of 4 probes succeed; the node remains usable.
-- *down*: at most 1 of 4 probes succeeds.
+- *VPN-only* — proxy-class traffic stays bound to the v2rayA SOCKS backend and fails closed when the backend is unavailable.
+- *Fail-open* — proxy-class traffic may temporarily fall back to direct Internet.
+- *Direct* — explicit operator override; classification remains active but the proxy class is routed directly.
 
-A down result is confirmed before failover. The watchdog stores per-node success/failure counters, consecutive failures, cooldown and EWMA latency.
+An internal emergency blocked configuration exists for invariant failures. Normal VPN health degradation does not activate a global LAN blackhole.
 
-## Failover
+Policy switching is implemented in Go by atomically replacing the generated policy config, validating it with Xray and restarting only vpn-policy.
 
-Candidates can come from multiple v2rayA subscriptions.
+## v2rayA backend
 
-Supported candidate transports currently include VLESS TCP + Reality, VLESS XHTTP + Reality, VLESS WebSocket + TLS, Hysteria2 and Shadowsocks.
+v2rayA owns subscriptions, node definitions and the selected VPN connection.
 
-Selection combines a transport base priority with historical health and latency.
+vpn-guardian ensures:
+
+~~~text
+transparent = close
+SOCKS backend = 127.0.0.1:20173
+~~~
+
+vpn-guardian reads v2rayA state and updates node selection through the local v2rayA API. Direct access to the SQLite database is used for local control metadata that v2rayA does not expose conveniently.
+
+## Watchdog and failover
+
+The watchdog probes four independent connectivity endpoints through the backend SOCKS listener.
+
+Health states:
+
+- *healthy* — 3 or 4 probes succeed;
+- *degraded* — 2 probes succeed;
+- *down* — 0 or 1 probe succeeds.
+
+A down state must remain confirmed before failover.
+
+Candidate eligibility is shared by watchdog, collector and control code. Current transports:
+
+- VLESS TCP + Reality;
+- VLESS XHTTP + Reality;
+- VLESS WebSocket + TLS;
+- Hysteria2;
+- Shadowsocks.
+
+Selection combines transport priority, EWMA latency, recent failures and exponential cooldown.
+
+## Collector
+
+The collector produces a cheap dashboard cache instead of making every UI refresh inspect v2rayA, nftables and external endpoints.
+
+It records:
+
+- current node/protocol/endpoint;
+- direct and VPN egress IPs;
+- health probe results;
+- candidate count and total node count;
+- stack/service state;
+- policy mode;
+- recent failures and switches;
+- history samples.
+
+The candidate count uses the same eligibility code as the watchdog, so *auto-selection* and *total nodes* cannot drift because of duplicated transport logic.
+
+## Dashboard and API
+
+The dashboard HTML is embedded into the vpn-guardian binary.
+
+The native Go HTTP server exposes:
+
+~~~text
+/
+ /healthz
+ /api/status
+ /api/history
+ /api/control
+~~~
+
+Default listener:
+
+~~~text
+0.0.0.0:20175
+~~~
+
+OpenWrt firewall policy determines which router interfaces can reach it. The package does not open a WAN firewall rule.
+
+When nginx is already installed, vpn.home.arpa is added as an optional reverse proxy to 127.0.0.1:20175. nginx is not required for the package to work.
+
+Control mutations require a management session and CSRF token. Initial management unlock is accepted only from the LAN CIDR declared in the stack manifest. X-Real-IP is trusted only when the immediate HTTP peer is loopback, which allows a local reverse proxy without allowing direct clients to spoof their source.
+
+## Bootstrap
+
+The first-run bootstrap is intentionally ordered so an unconfigured VPN cannot break ordinary Internet access:
+
+~~~text
+discover interfaces
+  -> create manifests
+  -> render and validate
+  -> start/prepare v2rayA backend-only
+  -> start dashboard/API
+  -> wait for usable VPN SOCKS backend
+  -> backup
+  -> apply front/policy/routing
+  -> self-test
+  -> enable boot services
+~~~
+
+If the VPN backend is not usable, bootstrap stops before front activation and retries later.
+
 ## Self-test
 
-The self-test verifies routing invariants without turning the working Mac into a transparent-routing test client.
+The self-test checks:
 
-It checks:
+- nftables front table;
+- policy rule and route table;
+- absence of a global LAN blackhole;
+- required services;
+- direct egress;
+- backend VPN egress;
+- fail-open behavior with a dead backend;
+- VPN-only fail-closed behavior;
+- emergency blocked behavior.
 
-- nftables front table.
-- policy rule and route table.
-- absence of a global LAN blackhole.
-- required services and router management access.
-- healthy direct and VPN egress.
-- fail-open behavior with a dead backend.
-- VPN-only fail-closed behavior with a dead backend.
-- emergency blackhole behavior.
+The destructive policy checks use isolated temporary Xray instances instead of changing the production front.
 
-## Declarative recovery
+## Backup and rollback
 
-The stack manager renders production Xray, nftables and init configuration from manifests.
-
-Apply and restore use a backup-first workflow:
+Apply follows:
 
 ~~~text
 backup
@@ -81,5 +171,25 @@ backup
   -> atomic install
   -> restart
   -> self-test
-  -> rollback on failure
+  -> enable at boot
 ~~~
+
+On failure:
+
+- a previously active stack is restored from its snapshot and restarted;
+- a clean first install removes generated TPROXY state and restores the sparse pre-apply snapshot.
+
+Package-owned binaries and static init files are not part of runtime backups; package management owns those files.
+
+## External runtime components
+
+vpn-guardian intentionally keeps only the external components that would be unreasonable to reimplement as small application helpers:
+
+- Xray for transparent proxy routing;
+- v2rayA for VPN subscriptions/nodes;
+- nftables and kernel TPROXY;
+- Linux policy routing;
+- CA roots;
+- geosite data.
+
+nginx and dnsmasq integrations are optional conveniences.

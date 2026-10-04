@@ -7,7 +7,6 @@ on:
     paths:
       - "cmd/**"
       - "internal/**"
-      - "dashboard/**"
       - "configs/**"
       - "package/openwrt/**"
       - "go.mod"
@@ -17,7 +16,6 @@ on:
     paths:
       - "cmd/**"
       - "internal/**"
-      - "dashboard/**"
       - "configs/**"
       - "package/openwrt/**"
       - "go.mod"

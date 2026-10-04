@@ -31,6 +31,8 @@ jobs:
             suffix: armv7
           - goarch: arm64
             suffix: arm64
+          - goarch: loong64
+            suffix: loong64
           - goarch: riscv64
             suffix: riscv64
     steps:

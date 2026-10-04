@@ -2,13 +2,11 @@ package api
 
 import (
 	"bufio"
-	"encoding/json"
 	"fmt"
 	"os"
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 )
 
 const (
@@ -38,46 +36,6 @@ type HistoryResponse struct {
 	Events         []Event  `json:"events"`
 }
 
-func Run(args []string) {
-	if len(args) == 0 {
-		writeError(400, "api command required")
-		return
-	}
-	switch args[0] {
-	case "status":
-		StatusCGI()
-	case "history":
-		HistoryCGI()
-	case "control":
-		ControlCGI()
-	default:
-		writeError(404, "unknown api command")
-	}
-}
-
-func StatusCGI() {
-	b, err := os.ReadFile(cachePath)
-	if err != nil {
-		writeError(503, "status cache unavailable")
-		return
-	}
-	writeHeaders(200)
-	_, _ = os.Stdout.Write(b)
-}
-
-func HistoryCGI() {
-	samples, _ := readSamples(historyPath, 1440)
-	events, _ := readEvents(eventPath, 500)
-	events = append(events, reconstructEvents(samples)...)
-	events = normalizeEvents(events, 500)
-
-	_, offset := time.Now().Zone()
-	writeJSON(200, HistoryResponse{
-		RouterTZOffset: offset,
-		Samples:        samples,
-		Events:         events,
-	})
-}
 func readSamples(path string, limit int) ([]Sample, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -216,19 +174,4 @@ func normalizeEvents(events []Event, limit int) []Event {
 		out = out[len(out)-limit:]
 	}
 	return out
-}
-
-func writeHeaders(status int) {
-	fmt.Printf("Status: %d\r\n", status)
-	fmt.Print("Content-Type: application/json\r\n")
-	fmt.Print("Cache-Control: no-store\r\n\r\n")
-}
-
-func writeJSON(status int, v any) {
-	writeHeaders(status)
-	_ = json.NewEncoder(os.Stdout).Encode(v)
-}
-
-func writeError(status int, message string) {
-	writeJSON(status, map[string]any{"ok": false, "error": message})
 }

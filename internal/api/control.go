@@ -14,27 +14,26 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/Yakwilik/openwrt-vpn-guardian/internal/control"
+	v2rayautil "github.com/Yakwilik/openwrt-vpn-guardian/internal/v2raya"
 )
 
 const (
-	authPath         = "/etc/vpn-dashboard-auth.json"
-	sessionDir       = "/tmp/vpn-dashboard-sessions"
-	sessionCookie    = "vpnctl"
-	legacyControlCGI = "/www/cgi-bin/vpn-control.legacy"
-	sessionTTL       = time.Hour
-	pinRounds        = 150000
+	authPath      = "/etc/vpn-dashboard-auth.json"
+	sessionDir    = "/tmp/vpn-dashboard-sessions"
+	sessionCookie = "vpnctl"
+	sessionTTL    = time.Hour
+	pinRounds     = 150000
+	stackPath     = "/etc/vpn-stack/stack.json"
 )
 
 type authConfig struct {
-	Version    int    `json:"Version,omitempty"`
-	Salt       string `json:"Salt"`
-	Hash       string `json:"Hash"`
-	Iterations int    `json:"Iterations,omitempty"`
+	Salt       string `json:"salt"`
+	Hash       string `json:"hash"`
+	Iterations int    `json:"iterations"`
 }
 
 type session struct {
@@ -73,123 +72,130 @@ type controlResponse struct {
 	Error          string                     `json:"error,omitempty"`
 }
 
-func ControlCGI() {
-	method := os.Getenv("REQUEST_METHOD")
-	if method == "" {
-		method = http.MethodGet
-	}
-
-	switch method {
+func HandleControlHTTP(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
 	case http.MethodGet:
-		handleControlGET()
+		handleControlGET(w, r)
 	case http.MethodPost:
-		handleControlPOST()
+		handleControlPOST(w, r)
 	default:
-		writeControlError(405, "method not allowed")
+		writeControlError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
 }
 
-func handleControlGET() {
-	token, sess, authenticated := currentSession()
-	configured, legacy := authConfigured()
-	resp, err := makeControlResponse(authenticated, configured, legacy, sess)
+func handleControlGET(w http.ResponseWriter, r *http.Request) {
+	token, sess, authenticated := currentSession(r)
+	configured := authConfigured()
+
+	resp, err := makeControlResponse(authenticated, configured)
 	if err != nil {
-		writeControlError(500, err.Error())
+		writeControlError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	if authenticated {
 		refreshSession(token, &sess)
 		resp.CSRF = sess.CSRF
 	}
-	writeControlJSON(200, resp, "")
+	writeControlJSON(w, http.StatusOK, resp)
 }
 
-func handleControlPOST() {
-	body, err := io.ReadAll(io.LimitReader(os.Stdin, 1<<20))
+func handleControlPOST(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	if err != nil {
-		writeControlError(400, err.Error())
-		return
-	}
-	var req controlRequest
-	if err := json.Unmarshal(body, &req); err != nil {
-		writeControlError(400, "invalid JSON")
+		writeControlError(w, http.StatusBadRequest, "cannot read request")
 		return
 	}
 
-	configured, legacy := authConfigured()
+	var req controlRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeControlError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+
+	configured := authConfigured()
 	if req.Action == "login" {
-		if legacy {
-			if fileExistsAPI(legacyHelperPath()) {
-				delegateLegacyLogin(body)
-				return
-			}
-			writeControlError(409, "legacy PIN requires migration helper")
-			return
-		}
 		if configured {
 			if !verifyPIN(req.PIN) {
-				writeControlError(401, "invalid PIN")
+				writeControlError(w, http.StatusUnauthorized, "invalid PIN")
 				return
 			}
-		} else {
-			if !isLANRequest() || os.Getenv("HTTP_X_VPN_UNLOCK") != "1" {
-				writeControlError(403, "initial unlock is allowed only from LAN")
-				return
-			}
-		}
-		token, sess, err := createSession()
-		if err != nil {
-			writeControlError(500, err.Error())
+		} else if r.Header.Get("X-VPN-Unlock") != "1" || !isLANRequest(r) {
+			writeControlError(w, http.StatusForbidden, "initial unlock is allowed only from router LAN")
 			return
 		}
-		resp, err := makeControlResponse(true, configured, false, sess)
+
+		token, sess, err := createSession()
 		if err != nil {
-			writeControlError(500, err.Error())
+			writeControlError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		http.SetCookie(w, &http.Cookie{
+			Name:     sessionCookie,
+			Value:    token,
+			Path:     "/",
+			MaxAge:   int(sessionTTL.Seconds()),
+			HttpOnly: true,
+			SameSite: http.SameSiteStrictMode,
+		})
+		resp, err := makeControlResponse(true, configured)
+		if err != nil {
+			writeControlError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		resp.CSRF = sess.CSRF
-		writeControlJSON(200, resp, sessionSetCookie(token))
+		writeControlJSON(w, http.StatusOK, resp)
 		return
 	}
 
-	token, sess, authenticated := currentSession()
+	token, sess, authenticated := currentSession(r)
 	if !authenticated {
-		writeControlError(401, "management session required")
+		writeControlError(w, http.StatusUnauthorized, "management session required")
 		return
 	}
+
 	if req.Action == "logout" {
 		_ = os.Remove(sessionFile(token))
-		resp, err := makeControlResponse(false, configured, legacy, session{})
+		http.SetCookie(w, &http.Cookie{
+			Name:     sessionCookie,
+			Value:    "",
+			Path:     "/",
+			MaxAge:   -1,
+			HttpOnly: true,
+			SameSite: http.SameSiteStrictMode,
+		})
+		resp, err := makeControlResponse(false, configured)
 		if err != nil {
-			writeControlError(500, err.Error())
+			writeControlError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		writeControlJSON(200, resp, sessionClearCookie())
+		writeControlJSON(w, http.StatusOK, resp)
 		return
 	}
-	if subtle.ConstantTimeCompare([]byte(os.Getenv("HTTP_X_VPN_CSRF")), []byte(sess.CSRF)) != 1 {
-		writeControlError(403, "invalid CSRF token")
+
+	if subtle.ConstantTimeCompare([]byte(r.Header.Get("X-VPN-CSRF")), []byte(sess.CSRF)) != 1 {
+		writeControlError(w, http.StatusForbidden, "invalid CSRF token")
 		return
 	}
 
 	result, err := executeControlAction(req)
 	if err != nil {
-		writeControlError(400, err.Error())
+		writeControlError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
 	if req.Action == "change_pin" {
-		configured, legacy = authConfigured()
+		configured = authConfigured()
 	}
 	refreshSession(token, &sess)
-	resp, err := makeControlResponse(true, configured, legacy, sess)
+
+	resp, err := makeControlResponse(true, configured)
 	if err != nil {
-		writeControlError(500, err.Error())
+		writeControlError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	resp.CSRF = sess.CSRF
 	resp.Result = result
-	writeControlJSON(200, resp, "")
+	writeControlJSON(w, http.StatusOK, resp)
 }
 
 func executeControlAction(req controlRequest) (string, error) {
@@ -243,7 +249,14 @@ func executeControlAction(req controlRequest) (string, error) {
 		}
 		return "", control.DeleteSubscription(req.ID)
 	case "repair":
-		return "", restartServiceAPI("vpn-backend-watchdog")
+		ready, err := v2rayautil.RepairBackendListener(true)
+		if err != nil {
+			return "", err
+		}
+		if !ready {
+			return "", errors.New("backend listener is still unavailable")
+		}
+		return "", nil
 	case "restart":
 		return "", restartAllowedService(req.Service)
 	default:
@@ -276,7 +289,7 @@ func restartServiceAPI(name string) error {
 	return nil
 }
 
-func makeControlResponse(authenticated, configured, legacy bool, sess session) (controlResponse, error) {
+func makeControlResponse(authenticated, configured bool) (controlResponse, error) {
 	snap, err := control.Snapshot(authenticated)
 	if err != nil {
 		return controlResponse{}, err
@@ -284,9 +297,6 @@ func makeControlResponse(authenticated, configured, legacy bool, sess session) (
 	mode := "setup"
 	if configured {
 		mode = "pin"
-	}
-	if legacy {
-		mode = "legacy"
 	}
 	return controlResponse{
 		OK:             true,
@@ -303,15 +313,12 @@ func makeControlResponse(authenticated, configured, legacy bool, sess session) (
 	}, nil
 }
 
-func authConfigured() (configured, legacy bool) {
+func authConfigured() bool {
 	var cfg authConfig
 	if err := readJSONFile(authConfigPath(), &cfg); err != nil {
-		return false, false
+		return false
 	}
-	if cfg.Salt == "" || cfg.Hash == "" {
-		return false, false
-	}
-	return true, cfg.Version < 2
+	return cfg.Salt != "" && cfg.Hash != "" && cfg.Iterations > 0
 }
 
 func savePIN(pin string) error {
@@ -320,7 +327,6 @@ func savePIN(pin string) error {
 		return err
 	}
 	cfg := authConfig{
-		Version:    2,
 		Salt:       hex.EncodeToString(salt),
 		Iterations: pinRounds,
 	}
@@ -330,7 +336,7 @@ func savePIN(pin string) error {
 
 func verifyPIN(pin string) bool {
 	var cfg authConfig
-	if readJSONFile(authConfigPath(), &cfg) != nil || cfg.Version < 2 {
+	if readJSONFile(authConfigPath(), &cfg) != nil || cfg.Iterations <= 0 {
 		return false
 	}
 	salt, err := hex.DecodeString(cfg.Salt)
@@ -341,11 +347,7 @@ func verifyPIN(pin string) bool {
 	if err != nil {
 		return false
 	}
-	rounds := cfg.Iterations
-	if rounds <= 0 {
-		rounds = pinRounds
-	}
-	got := pinDigest(pin, salt, rounds)
+	got := pinDigest(pin, salt, cfg.Iterations)
 	return len(got) == len(want) && subtle.ConstantTimeCompare(got, want) == 1
 }
 
@@ -385,11 +387,12 @@ func createSession() (string, session, error) {
 	return token, sess, nil
 }
 
-func currentSession() (string, session, bool) {
-	token := cookieValue(os.Getenv("HTTP_COOKIE"), sessionCookie)
-	if !validSessionToken(token) {
+func currentSession(r *http.Request) (string, session, bool) {
+	cookie, err := r.Cookie(sessionCookie)
+	if err != nil || !validSessionToken(cookie.Value) {
 		return "", session{}, false
 	}
+	token := cookie.Value
 	var sess session
 	if err := readJSONFile(sessionFile(token), &sess); err != nil {
 		return "", session{}, false
@@ -421,16 +424,6 @@ func validSessionToken(token string) bool {
 	return err == nil
 }
 
-func cookieValue(header, name string) string {
-	for _, part := range strings.Split(header, ";") {
-		part = strings.TrimSpace(part)
-		if key, value, ok := strings.Cut(part, "="); ok && key == name {
-			return value
-		}
-	}
-	return ""
-}
-
 func randomHex(n int) (string, error) {
 	b := make([]byte, n)
 	if _, err := rand.Read(b); err != nil {
@@ -439,17 +432,54 @@ func randomHex(n int) (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
-func sessionSetCookie(token string) string {
-	return fmt.Sprintf("%s=%s; Path=/; HttpOnly; SameSite=Strict; Max-Age=%d", sessionCookie, token, int(sessionTTL.Seconds()))
+func dashboardPeerAllowed(r *http.Request) bool {
+	peer := r.RemoteAddr
+	if host, _, err := net.SplitHostPort(peer); err == nil {
+		peer = host
+	}
+	peerIP := net.ParseIP(strings.TrimSpace(peer))
+	if peerIP == nil {
+		return false
+	}
+	if peerIP.IsLoopback() {
+		return true
+	}
+
+	var cfg struct {
+		LANCIDR string `json:"lanCidr"`
+	}
+	if err := readJSONFile(stackPath, &cfg); err != nil || cfg.LANCIDR == "" {
+		return false
+	}
+	_, subnet, err := net.ParseCIDR(cfg.LANCIDR)
+	return err == nil && subnet.Contains(peerIP)
 }
 
-func sessionClearCookie() string {
-	return sessionCookie + "=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0"
-}
+func isLANRequest(r *http.Request) bool {
+	peer := r.RemoteAddr
+	if host, _, err := net.SplitHostPort(peer); err == nil {
+		peer = host
+	}
+	peerIP := net.ParseIP(strings.TrimSpace(peer))
+	if peerIP == nil {
+		return false
+	}
 
-func isLANRequest() bool {
-	ip := net.ParseIP(strings.TrimSpace(os.Getenv("REMOTE_ADDR")))
-	return ip != nil && (ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast())
+	remoteIP := peerIP
+	if peerIP.IsLoopback() {
+		if forwarded := net.ParseIP(strings.TrimSpace(r.Header.Get("X-Real-IP"))); forwarded != nil {
+			remoteIP = forwarded
+		}
+	}
+
+	var cfg struct {
+		LANCIDR string `json:"lanCidr"`
+	}
+	if err := readJSONFile(stackPath, &cfg); err != nil || cfg.LANCIDR == "" {
+		return remoteIP.IsLoopback()
+	}
+	_, subnet, err := net.ParseCIDR(cfg.LANCIDR)
+	return err == nil && subnet.Contains(remoteIP)
 }
 
 func readJSONFile(path string, dst any) error {
@@ -474,61 +504,14 @@ func writeJSONFileAtomic(path string, v any, mode os.FileMode) error {
 		return err
 	}
 	if err := os.Chmod(tmp, mode); err != nil {
+		_ = os.Remove(tmp)
 		return err
 	}
-	return os.Rename(tmp, path)
-}
-
-func fileExistsAPI(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
-}
-
-func writeControlJSON(status int, v controlResponse, setCookie string) {
-	fmt.Printf("Status: %d\r\n", status)
-	fmt.Print("Content-Type: application/json\r\n")
-	fmt.Print("Cache-Control: no-store\r\n")
-	if setCookie != "" {
-		fmt.Printf("Set-Cookie: %s\r\n", setCookie)
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
 	}
-	fmt.Print("\r\n")
-	_ = json.NewEncoder(os.Stdout).Encode(v)
-}
-
-func writeControlError(status int, message string) {
-	resp := controlResponse{OK: false, Error: message, Message: message}
-	writeControlJSON(status, resp, "")
-}
-
-func delegateLegacyLogin(body []byte) {
-	helper := legacyHelperPath()
-	cmd := exec.Command(helper)
-	env := make([]string, 0, len(os.Environ())+3)
-	for _, item := range os.Environ() {
-		if strings.HasPrefix(item, "SCRIPT_FILENAME=") ||
-			strings.HasPrefix(item, "SCRIPT_NAME=") ||
-			strings.HasPrefix(item, "CONTENT_LENGTH=") {
-			continue
-		}
-		env = append(env, item)
-	}
-	env = append(env,
-		"SCRIPT_FILENAME="+helper,
-		"SCRIPT_NAME=/cgi-bin/vpn-control.legacy",
-		"CONTENT_LENGTH="+strconv.Itoa(len(body)),
-	)
-	cmd.Env = env
-	cmd.Stdin = strings.NewReader(string(body))
-	out, err := cmd.CombinedOutput()
-	if len(out) > 0 && strings.Contains(string(out), "Content-Type:") {
-		_, _ = os.Stdout.Write(out)
-		return
-	}
-	if err != nil {
-		writeControlError(401, "legacy PIN verification failed")
-		return
-	}
-	writeControlError(500, "legacy control helper returned invalid CGI response")
+	return nil
 }
 
 func authConfigPath() string {
@@ -545,9 +528,13 @@ func sessionDirectory() string {
 	return sessionDir
 }
 
-func legacyHelperPath() string {
-	if v := strings.TrimSpace(os.Getenv("VPN_GUARDIAN_LEGACY_CONTROL_CGI")); v != "" {
-		return v
-	}
-	return legacyControlCGI
+func writeControlJSON(w http.ResponseWriter, status int, v controlResponse) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func writeControlError(w http.ResponseWriter, status int, message string) {
+	writeControlJSON(w, status, controlResponse{OK: false, Error: message, Message: message})
 }

@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Yakwilik/openwrt-vpn-guardian/internal/policy"
 	v2rayautil "github.com/Yakwilik/openwrt-vpn-guardian/internal/v2raya"
 
 	"golang.org/x/net/proxy"
@@ -30,16 +31,15 @@ import (
 )
 
 const (
-	dbPath             = "/etc/v2raya/v2raya.db"
-	controlPath        = "/etc/v2raya-failover-control.json"
-	statePath          = "/tmp/vpn-backend-state.json"
-	eventPath          = "/tmp/vpn-dashboard-events.tsv"
-	legacyFailuresPath = "/tmp/vpn-backend-failures"
-	proxyAddr          = "127.0.0.1:20173"
-	tag                = "vpn-backend-watchdog"
-	policyRuntimePath  = "/etc/vpn-policy-runtime"
-	policyModePath     = "/etc/vpn-policy-mode"
-	lockPath           = "/tmp/vpn-backend-watchdog.lock"
+	dbPath            = "/etc/v2raya/v2raya.db"
+	controlPath       = "/etc/vpn-stack/control.json"
+	statePath         = "/tmp/vpn-guardian-watchdog-state.json"
+	eventPath         = "/tmp/vpn-dashboard-events.tsv"
+	proxyAddr         = "127.0.0.1:20173"
+	tag               = "vpn-guardian-watchdog"
+	policyRuntimePath = "/etc/vpn-policy-runtime"
+	policyModePath    = "/etc/vpn-policy-mode"
+	lockPath          = "/tmp/vpn-guardian-control.lock"
 )
 
 type Candidate struct {
@@ -321,11 +321,6 @@ func loadState() State {
 	if b, err := os.ReadFile(statePath); err == nil {
 		_ = json.Unmarshal(b, &s)
 	}
-	if s.Failures == 0 {
-		if b, err := os.ReadFile(legacyFailuresPath); err == nil {
-			fmt.Sscanf(strings.TrimSpace(string(b)), "%d", &s.Failures)
-		}
-	}
 	if s.Nodes == nil {
 		s.Nodes = map[string]NodeStats{}
 	}
@@ -337,7 +332,6 @@ func saveState(s State) {
 	tmp := statePath + ".new"
 	_ = os.WriteFile(tmp, b, 0600)
 	_ = os.Rename(tmp, statePath)
-	_ = os.WriteFile(legacyFailuresPath, []byte(fmt.Sprintf("%d\n", s.Failures)), 0600)
 }
 
 func candidateKey(c Candidate) string {
@@ -623,16 +617,16 @@ func ensureBackend() bool {
 	if listenerReady() {
 		return true
 	}
-	logLine("backend listener missing; starting v2rayA")
-	_ = exec.Command("/etc/init.d/v2raya", "start").Run()
-	deadline := time.Now().Add(6 * time.Second)
-	for time.Now().Before(deadline) {
-		if listenerReady() {
-			return true
-		}
-		time.Sleep(250 * time.Millisecond)
+	logLine("backend listener missing; attempting v2rayA runtime repair")
+	ready, err := v2rayautil.RepairBackendListener(false)
+	if err != nil {
+		logLine("backend runtime repair failed: %v", err)
+		return false
 	}
-	return false
+	if ready {
+		logLine("backend listener recovered after runtime repair")
+	}
+	return ready
 }
 func health(timeout time.Duration) HealthResult {
 	targets := []struct{ Name, URL string }{
@@ -763,9 +757,8 @@ func syncPolicyRuntime(ctrl Control, backendHealthy bool) error {
 	if readTrimmed(policyRuntimePath) == want {
 		return nil
 	}
-	out, err := exec.Command("/usr/bin/vpn-policy-mode", want).CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("apply policy runtime %s: %w: %s", want, err, strings.TrimSpace(string(out)))
+	if err := policy.Apply(want); err != nil {
+		return fmt.Errorf("apply policy runtime %s: %w", want, err)
 	}
 	logLine("policy runtime -> %s", want)
 	return nil
@@ -967,12 +960,12 @@ func inspect() error {
 	return json.NewEncoder(os.Stdout).Encode(out)
 }
 
-// Run executes the production watchdog command using legacy-compatible flags.
+// Run executes the vpn-guardian watchdog command.
 func Run(args []string) {
 	oldArgs := os.Args
 	oldFlags := flag.CommandLine
 	flag.CommandLine = flag.NewFlagSet("vpn-guardian watchdog", flag.ExitOnError)
-	os.Args = append([]string{"vpn-backend-watchdog"}, args...)
+	os.Args = append([]string{"vpn-guardian watchdog"}, args...)
 	defer func() {
 		os.Args = oldArgs
 		flag.CommandLine = oldFlags

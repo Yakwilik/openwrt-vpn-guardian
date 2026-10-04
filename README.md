@@ -2,7 +2,7 @@
 
 OpenWrt VPN Guardian is a selective VPN control plane for OpenWrt with v2rayA as the VPN backend.
 
-The core invariant is simple: ordinary direct traffic is independent from VPN health. Only traffic matched by the selective routing rules is sent to the VPN backend.
+Its main invariant is that ordinary direct traffic does not depend on VPN health. Only traffic matched by the selective routing rules enters the VPN path.
 
 ## Architecture
 
@@ -26,22 +26,90 @@ vpn-front (Xray TPROXY)
 
 v2rayA runs in backend-only mode with its own transparent proxy disabled.
 
+The single *vpn-guardian* Go binary provides stack management, watchdog, collector, self-test, dashboard UI and dashboard API. Xray remains the packet-routing engine and v2rayA remains the VPN backend.
+
 ## Features
 
 - Stable Xray front router with TPROXY.
-- Selective routing by geosite domains and IP ranges.
+- Selective routing by geosite domains and explicit IP ranges.
 - Direct traffic remains available when the VPN backend is unhealthy.
 - VPN-only and fail-open policies for the proxy class.
 - Automatic failover across multiple v2rayA subscriptions.
 - VLESS TCP + Reality, VLESS XHTTP + Reality, VLESS WS + TLS, Hysteria2 and Shadowsocks candidates.
 - Node scoring, EWMA latency and exponential cooldown.
 - Pinned-node and automatic selection modes.
-- Multi-provider backend health checks with healthy/degraded/down states.
-- Dashboard with status, health history, events, nodes and subscriptions.
-- One unified Go binary for stack management, watchdog, collector, self-test and dashboard APIs.
-- Declarative manifests with validation, backup, rollback and bootstrap.
+- Four independent backend health probes with healthy/degraded/down states.
+- Embedded dashboard with status, history, events, nodes and subscriptions.
+- Declarative manifests with validation, backup and rollback.
+- Automatic first-run bootstrap.
 
-## Unified binary
+## Installation
+
+The package is intended to require only:
+
+~~~sh
+opkg install vpn-guardian_*.ipk
+~~~
+
+The post-install bootstrap automatically:
+
+1. Detects the LAN interface, LAN CIDR/address and WAN interface.
+2. Creates router-specific manifests under /etc/vpn-stack.
+3. Validates generated Xray and nftables configuration.
+4. Enables v2rayA and switches it to backend-only mode.
+5. Starts the embedded dashboard/API server.
+6. Adds vpn.home.arpa to dnsmasq when dnsmasq is present.
+7. Integrates with an existing nginx installation when nginx is present.
+8. Generates the Xray front/policy, TPROXY routing, watchdog and collector configuration.
+9. Creates a pre-apply backup.
+10. Activates the stack, runs the self-test and enables boot services only after validation succeeds.
+
+If v2rayA has no usable VPN node yet, bootstrap deliberately leaves the front inactive. The dashboard remains available so a subscription can be configured, and the bootstrap service retries automatically.
+
+A read-only preflight is available:
+
+~~~sh
+vpn-guardian bootstrap --dry-run
+~~~
+
+## Dashboard
+
+The dashboard is embedded into the Go binary.
+
+Without any external web server it is available directly on the router LAN:
+
+~~~text
+http://<router-lan-ip>:20175/
+~~~
+
+When nginx is already installed, the package adds a small reverse-proxy virtual host and the same dashboard is available as:
+
+~~~text
+http://vpn.home.arpa/
+~~~
+
+nginx is optional and is not an OpenWrt package dependency.
+
+## Runtime dependencies
+
+The OpenWrt package depends only on components that are not reasonably replaced by a small amount of application code:
+
+- *v2raya* — VPN backend and subscription/node management.
+- *xray-core* — front and policy proxy engine.
+- *v2ray-geosite* — geosite datasets used by selective routing.
+- *ca-bundle* — CA roots for HTTPS health checks.
+- *ip-full* — policy routing operations required by TPROXY.
+- *nftables-json* — nftables userspace CLI used to validate and apply the front ruleset.
+- *kmod-nft-tproxy* — kernel TPROXY support; it pulls its nftables/core dependencies.
+
+Not required:
+
+- nginx — optional integration only.
+- fcgiwrap/CGI — the dashboard API is native Go HTTP.
+- v2ray-geoip — no geoip rules are used.
+- kmod-nft-socket — the generated front rules do not use the nft socket expression.
+
+## Commands
 
 ~~~text
 vpn-guardian bootstrap [--dry-run]
@@ -51,104 +119,70 @@ vpn-guardian apply
 vpn-guardian backup
 vpn-guardian restore <archive>
 vpn-guardian selftest
-vpn-guardian watchdog -mode daemon
+vpn-guardian watchdog [flags]
 vpn-guardian collector -mode collect -interval 3s
-vpn-guardian control -mode auto
-vpn-guardian api status|history|control
-~~~
-
-Compatibility symlinks are installed for the legacy command names:
-
-~~~text
-vpn-stack
-vpn-selftest
-vpn-backend-watchdog
-vpn-status-collector
-v2raya-failover
-vpn-status
-vpn-history
-vpn-control
-~~~
-
-## First-run bootstrap
-
-The OpenWrt package is designed to configure the stack automatically.
-
-Bootstrap:
-
-1. Detects the LAN interface, LAN CIDR/address and WAN interface.
-2. Creates the version-1 stack and routing manifests if they do not exist.
-3. Validates generated Xray and nftables configuration before activation.
-4. Enables v2rayA and converts it to backend-only mode (transparent=close).
-5. Configures local vpn.home.arpa DNS.
-6. Starts the loopback-only native dashboard API service and reloads the nginx virtual host.
-7. Generates the front, policy, policy-routing, watchdog and collector configuration.
-8. Creates a pre-apply backup.
-9. Activates the stack and runs the complete self-test.
-10. Enables the services at boot only after the runtime passes validation.
-
-If v2rayA does not yet have an active SOCKS backend, bootstrap leaves the front inactive and the bootstrap service retries in the background. Installing the package therefore does not make ordinary Internet access depend on an unconfigured VPN backend.
-
-Before an upgrade or manual activation, the discovery path can be checked without persistent changes:
-
-~~~sh
-vpn-guardian bootstrap --dry-run
-~~~
-
-## OpenWrt package
-
-The current package target used for GL.iNet GL-MT6000 testing is:
-
-~~~text
-OpenWrt 24.10.4
-target: mediatek/filogic
-architecture: aarch64_cortex-a53
-~~~
-
-The package recipe is in package/openwrt. The GitHub Actions package workflow builds the IPK from the current checkout using the official OpenWrt SDK.
-
-A package install is intended to be enough:
-
-~~~sh
-opkg install vpn-guardian_*.ipk
-~~~
-
-The post-install hook starts the safe bootstrap service automatically. The package also migrates the legacy dashboard nginx virtual host out of the active config and preserves the legacy control CGI only when it is needed for PIN/session migration.
-
-The Go binary is built with CGO disabled and internal linking. Dependencies are pinned to versions that build with Go 1.23.12, matching the OpenWrt 24.10 package feed. CGO-free builds are supported on 386, amd64, arm, arm64 and riscv64; MIPS/MIPS64 targets are deliberately excluded because modernc/sqlite does not support them in this configuration.
-
-## Build the Go binary
-
-~~~sh
-GOTOOLCHAIN=go1.23.12 go test ./...
-CGO_ENABLED=0 GOOS=linux GOARCH=arm64 GOTOOLCHAIN=go1.23.12 go build -trimpath -o vpn-guardian ./cmd/vpn-guardian
+vpn-guardian control [flags]
+vpn-guardian api-server [-listen 0.0.0.0:20175]
 ~~~
 
 ## Configuration
 
-Runtime manifests live in:
+Runtime manifests:
 
 ~~~text
 /etc/vpn-stack/stack.json
 /etc/vpn-stack/routing.json
+/etc/vpn-stack/control.json
 ~~~
 
-They are generated from the router on first install instead of shipping router-specific interface names or addresses inside the package.
+The first two are generated from the router during bootstrap instead of shipping router-specific interface names or IP addresses.
 
-Generic examples remain available in the repository under configs/.
+Generic examples live under *configs/* and are also included in the package under */usr/share/vpn-guardian/examples/*.
+
+## Build model
+
+The binary is pure Go and OpenWrt builds it with:
+
+~~~text
+CGO_ENABLED=0
+internal Go linker
+target GOOS/GOARCH supplied by the OpenWrt SDK
+~~~
+
+CI additionally cross-builds static Linux binaries for:
+
+- 386
+- amd64
+- arm
+- arm64
+- loong64
+- riscv64
+
+MIPS and MIPS64 are deliberately excluded because the current pure-Go SQLite dependency does not support those targets in this configuration.
+
+The reference package target is:
+
+~~~text
+OpenWrt 24.10.4
+mediatek/filogic
+aarch64_cortex-a53
+GL.iNet GL-MT6000
+~~~
+
+The OpenWrt package workflow builds the IPK from the exact Git commit using the matching official OpenWrt SDK and verifies that the packaged binary is statically linked with no dynamic dependencies.
 
 ## Safety model
 
-Direct traffic must continue to work when v2rayA is restarting, unhealthy or completely unavailable.
+Direct traffic must continue to work when v2rayA is restarting, unhealthy or unavailable.
 
 In VPN-only mode only the proxy class fails closed. There is no global LAN blackhole.
 
-Every apply creates a backup first. A failed restart, self-test or service-enable step rolls the runtime back as well as the files. On a clean first install a rollback also removes the front TPROXY rules and marker so ordinary routing is restored.
+Every apply creates a backup before replacing runtime configuration. A failed restart, self-test or service-enable step rolls back both files and runtime state. On a clean first install, rollback removes generated TPROXY state and restores ordinary routing.
 
-## Project status
+## Development status
 
-The unified binary, collector, status/history/control API, bootstrap logic and OpenWrt package layout are implemented in the repository.
+The unified binary, embedded dashboard/API, backend-only v2rayA bootstrap, collector, watchdog, self-test and OpenWrt package recipe are implemented.
 
-The remaining work before a tagged release is OpenWrt SDK package validation, controlled installation on the reference GL-MT6000, reboot/upgrade testing, and broader tests.
+Before the first tagged release the package must pass the SDK build, controlled install, reboot, upgrade and rollback checklist on the reference GL-MT6000.
 
-See docs/architecture.md and docs/migration.md.
+See *docs/architecture.md* and *docs/release-checklist.md*.

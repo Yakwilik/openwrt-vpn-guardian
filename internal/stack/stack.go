@@ -16,7 +16,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Yakwilik/openwrt-vpn-guardian/internal/control"
+	"github.com/Yakwilik/openwrt-vpn-guardian/internal/policy"
+	v2rayautil "github.com/Yakwilik/openwrt-vpn-guardian/internal/v2raya"
 )
 
 const (
@@ -107,6 +108,8 @@ func main() {
 		}
 	case "status":
 		err = statusCmd()
+	case "cleanup":
+		err = cleanupCmd()
 	case "validate":
 		err = validateCmd()
 	case "apply":
@@ -135,7 +138,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: vpn-stack {bootstrap [--dry-run]|init [--dry-run] [--force]|status|validate|apply|backup|restore <archive>|selftest}")
+	fmt.Fprintln(os.Stderr, "usage: vpn-guardian stack {bootstrap [--dry-run]|init [--dry-run] [--force]|status|validate|apply|backup|restore <archive>|selftest|cleanup}")
 	os.Exit(2)
 }
 
@@ -165,8 +168,8 @@ func bootstrapCmd(dryRun bool) error {
 				return fmt.Errorf("validate manifests: %w", err)
 			}
 		}
-		socksReady := control.BackendSOCKSReady()
-		backendUsable := control.BackendUsable()
+		socksReady := v2rayautil.BackendSOCKSReady()
+		backendUsable := v2rayautil.BackendUsable()
 		plan := map[string]any{
 			"dryRun":             true,
 			"stackManifest":      stackExists,
@@ -204,8 +207,11 @@ func bootstrapCmd(dryRun bool) error {
 	if err := ensureV2rayAService(); err != nil {
 		return err
 	}
-	if err := control.EnsureBackendOnly(); err != nil {
+	if err := v2rayautil.EnsureBackendOnly(); err != nil {
 		return fmt.Errorf("configure v2rayA backend-only mode: %w", err)
+	}
+	if _, err := v2rayautil.RepairBackendListener(false); err != nil {
+		return fmt.Errorf("repair v2rayA backend listener: %w", err)
 	}
 	if err := setupDashboardDNS(); err != nil {
 		return fmt.Errorf("configure dashboard DNS: %w", err)
@@ -214,7 +220,7 @@ func bootstrapCmd(dryRun bool) error {
 		return fmt.Errorf("configure dashboard runtime: %w", err)
 	}
 
-	if !control.BackendUsable() {
+	if !v2rayautil.BackendUsable() {
 		_ = os.Remove(bootstrapMarker)
 		fmt.Println("bootstrap pending: v2rayA backend is not usable through SOCKS 127.0.0.1:20173")
 		fmt.Println("front remains inactive; the bootstrap service will retry automatically")
@@ -235,7 +241,7 @@ func bootstrapCmd(dryRun bool) error {
 }
 
 func checkBootstrapDependencies() error {
-	required := []string{"xray", "v2raya", "nginx", "nft", "ip", "uci", "ubus"}
+	required := []string{"xray", "v2raya", "nft", "ip", "uci", "ubus"}
 	var missing []string
 	for _, name := range required {
 		if _, err := exec.LookPath(name); err != nil {
@@ -291,6 +297,10 @@ func detectLANAddress(iface string) string {
 }
 
 func setupDashboardDNS() error {
+	if _, err := os.Stat("/etc/init.d/dnsmasq"); err != nil {
+		return nil
+	}
+
 	s, _, err := loadConfig()
 	if err != nil {
 		return err
@@ -347,6 +357,12 @@ func setupDashboardRuntime() error {
 		return fmt.Errorf("vpn-guardian-api did not listen on %s", defaultDashboardAPIAddr)
 	}
 
+	if _, err := exec.LookPath("nginx"); err != nil {
+		return nil
+	}
+	if _, err := os.Stat("/etc/init.d/nginx"); err != nil {
+		return nil
+	}
 	if out, err := run("nginx", "-t", "-c", "/etc/nginx/nginx.conf"); err != nil {
 		return fmt.Errorf("nginx config invalid: %v: %s", err, out)
 	}
@@ -856,24 +872,70 @@ func applyCmd() error {
 }
 func rollbackApply(snapshot string, frontWasEnabled bool) {
 	if !frontWasEnabled {
-		for _, svc := range []string{"vpn-dashboard-collector", "vpn-backend-watchdog", "vpn-front-routing", "vpn-front", "vpn-policy"} {
-			_, _ = run("/etc/init.d/"+svc, "stop")
-		}
-		_ = exec.Command("nft", "delete", "table", "inet", "vpn_front").Run()
-		for i := 0; i < 4; i++ {
-			_ = exec.Command("ip", "rule", "del", "priority", "5").Run()
-		}
-		if s, _, err := loadConfig(); err == nil && s.Front.RouteTable > 0 {
-			_ = exec.Command("ip", "route", "flush", "table", strconv.Itoa(s.Front.RouteTable)).Run()
-		}
-		_ = os.Remove("/etc/vpn-front-enabled")
+		cleanupGeneratedRuntime()
 	}
 
-	_ = restore(snapshot, false)
+	_ = restoreSnapshotSparse(snapshot)
 
 	if frontWasEnabled {
 		_ = restartStack()
 	}
+}
+
+func cleanupCmd() error {
+	if os.Geteuid() != 0 {
+		return errors.New("cleanup must run as root")
+	}
+	cleanupGeneratedRuntime()
+	_ = os.Remove(bootstrapMarker)
+	fmt.Println("cleanup OK")
+	return nil
+}
+
+func cleanupGeneratedRuntime() {
+	for _, svc := range []string{"vpn-dashboard-collector", "vpn-backend-watchdog", "vpn-front-routing", "vpn-front", "vpn-policy"} {
+		if _, err := os.Stat("/etc/init.d/" + svc); err == nil {
+			_, _ = run("/etc/init.d/"+svc, "stop")
+		}
+	}
+	_ = exec.Command("nft", "delete", "table", "inet", "vpn_front").Run()
+	for i := 0; i < 4; i++ {
+		_ = exec.Command("ip", "rule", "del", "priority", "5").Run()
+	}
+	if s, _, err := loadConfig(); err == nil && s.Front.RouteTable > 0 {
+		_ = exec.Command("ip", "route", "flush", "table", strconv.Itoa(s.Front.RouteTable)).Run()
+	}
+
+	for _, path := range []string{
+		"/etc/xray/vpn-front.json",
+		"/etc/xray/vpn-policy.json",
+		"/etc/xray/vpn-policy-failopen.json",
+		"/etc/xray/vpn-policy-killswitch.json",
+		"/etc/xray/vpn-policy-killswitch-blocked.json",
+		"/etc/xray/vpn-policy-direct.json",
+		"/etc/vpn-front.nft",
+		"/etc/vpn-front-enabled",
+		"/etc/vpn-policy-mode",
+		"/etc/vpn-policy-runtime",
+		"/etc/init.d/vpn-front-routing",
+		"/etc/init.d/vpn-backend-watchdog",
+		"/etc/init.d/vpn-dashboard-collector",
+	} {
+		_ = os.Remove(path)
+	}
+}
+
+func restoreSnapshotSparse(archive string) error {
+	dir, err := os.MkdirTemp("/tmp", "vpn-stack-rollback-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(dir)
+
+	if err := extractArchive(archive, dir); err != nil {
+		return err
+	}
+	return installExtracted(dir)
 }
 
 func enableStackServices() error {
@@ -900,8 +962,8 @@ func restartStack() error {
 		}
 		mode = s.Policy.Default
 	}
-	if out, err := run("/usr/bin/vpn-policy-mode", mode); err != nil {
-		return fmt.Errorf("vpn-policy-mode %s: %v: %s", mode, err, out)
+	if err := policy.Apply(mode); err != nil {
+		return fmt.Errorf("apply policy mode %s: %w", mode, err)
 	}
 
 	for _, svc := range []string{"vpn-front", "vpn-front-routing", "vpn-backend-watchdog", "vpn-dashboard-collector"} {
@@ -938,7 +1000,9 @@ func readFile(path string) string {
 var backupFiles = []string{
 	"/etc/vpn-stack/stack.json",
 	"/etc/vpn-stack/routing.json",
+	"/etc/vpn-stack/control.json",
 	"/etc/xray/vpn-front.json",
+	"/etc/xray/vpn-policy.json",
 	"/etc/xray/vpn-policy-failopen.json",
 	"/etc/xray/vpn-policy-killswitch.json",
 	"/etc/xray/vpn-policy-killswitch-blocked.json",
@@ -947,30 +1011,11 @@ var backupFiles = []string{
 	"/etc/vpn-front-enabled",
 	"/etc/vpn-policy-mode",
 	"/etc/vpn-policy-runtime",
-	"/etc/v2raya-failover-control.json",
 	"/etc/v2raya/v2raya.db",
 	"/etc/vpn-dashboard-auth.json",
-	"/etc/nginx/conf.d/vpn-guardian.conf",
-	"/etc/init.d/vpn-front",
-	"/etc/init.d/vpn-policy",
 	"/etc/init.d/vpn-front-routing",
 	"/etc/init.d/vpn-backend-watchdog",
 	"/etc/init.d/vpn-dashboard-collector",
-	"/etc/init.d/vpn-guardian-api",
-	"/etc/init.d/vpn-guardian-bootstrap",
-	"/etc/hotplug.d/iface/99-vpn-front-routing",
-	"/usr/bin/vpn-policy-mode",
-	"/usr/bin/vpn-guardian",
-	"/usr/bin/vpn-backend-watchdog",
-	"/usr/bin/vpn-selftest",
-	"/usr/bin/vpn-status-collector",
-	"/usr/bin/vpn-stack",
-	"/www/cgi-bin/vpn-status",
-	"/www/cgi-bin/vpn-control",
-	"/www/cgi-bin/vpn-control.legacy",
-	"/www/cgi-bin/vpn-history",
-	"/www/vpn-dashboard/index.html",
-	"/etc/vpn-stack/legacy/vpn-dashboard.conf",
 }
 
 func backup(reason string) (string, error) {
@@ -1225,13 +1270,7 @@ func installExtracted(dir string) error {
 }
 
 func runSelftest() error {
-	binary := "/usr/bin/vpn-guardian"
-	args := []string{"selftest"}
-	if _, err := os.Stat(binary); err != nil {
-		binary = "/usr/bin/vpn-selftest"
-		args = nil
-	}
-	out, err := run(binary, args...)
+	out, err := run("/usr/bin/vpn-guardian", "selftest")
 	if err != nil {
 		return fmt.Errorf("%v: %s", err, out)
 	}
@@ -1250,8 +1289,8 @@ func statusCmd() error {
 	entries, _ := os.ReadDir(backupDir)
 	st := Status{
 		ManifestVersion: s.Version,
-		Mode:            strings.TrimSpace(readFile("/etc/vpn-policy-mode")),
-		Runtime:         strings.TrimSpace(readFile("/etc/vpn-policy-runtime")),
+		Mode:            policy.Status(),
+		Runtime:         policy.Runtime(),
 		Front:           serviceRunning("vpn-front"),
 		Policy:          serviceRunning("vpn-policy"),
 		Backend:         serviceRunning("v2raya"),
@@ -1273,10 +1312,10 @@ func readCmd(name string, args ...string) string {
 	return string(b)
 }
 
-// Run executes the stack manager with legacy-compatible arguments.
+// Run executes the vpn-guardian stack command.
 func Run(args []string) {
 	oldArgs := os.Args
-	os.Args = append([]string{"vpn-stack"}, args...)
+	os.Args = append([]string{"vpn-guardian stack"}, args...)
 	defer func() { os.Args = oldArgs }()
 	main()
 }

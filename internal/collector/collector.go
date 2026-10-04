@@ -23,8 +23,8 @@ import (
 const (
 	dbPath      = "/etc/v2raya/v2raya.db"
 	stackPath   = "/etc/vpn-stack/stack.json"
-	controlPath = "/etc/v2raya-failover-control.json"
-	statePath   = "/tmp/vpn-backend-state.json"
+	controlPath = "/etc/vpn-stack/control.json"
+	statePath   = "/tmp/vpn-guardian-watchdog-state.json"
 	cachePath   = "/tmp/vpn-status-cache.json"
 	historyPath = "/tmp/vpn-dashboard-history.tsv"
 	proxyAddr   = "127.0.0.1:20173"

@@ -4,7 +4,6 @@ START=99
 STOP=3
 
 MARKER=/etc/vpn-stack/bootstrap-complete
-LOG=/tmp/vpn-guardian-bootstrap.log
 
 start_service() {
   [ -f "$MARKER" ] && return 0
@@ -12,8 +11,9 @@ start_service() {
   procd_open_instance vpn-guardian-bootstrap
   procd_set_param command /bin/sh -c 'while [ ! -f /etc/vpn-stack/bootstrap-complete ]; do
     if ! /usr/bin/vpn-guardian bootstrap >>/tmp/vpn-guardian-bootstrap.log 2>&1; then
-      logger -t vpn-guardian-bootstrap "bootstrap failed; see /tmp/vpn-guardian-bootstrap.log"
-      exit 1
+      logger -t vpn-guardian-bootstrap "bootstrap failed; retrying in 15s"
+      sleep 15
+      continue
     fi
     [ -f /etc/vpn-stack/bootstrap-complete ] && exit 0
     sleep 15

@@ -24,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Yakwilik/openwrt-vpn-guardian/internal/policy"
 	v2rayautil "github.com/Yakwilik/openwrt-vpn-guardian/internal/v2raya"
 
 	"golang.org/x/sys/unix"
@@ -31,8 +32,8 @@ import (
 )
 
 const dbPath = "/etc/v2raya/v2raya.db"
-const statePath = "/tmp/v2raya-failover-state.json"
-const controlPath = "/etc/v2raya-failover-control.json"
+const statePath = "/tmp/vpn-guardian-control-state.json"
+const controlPath = "/etc/vpn-stack/control.json"
 const proxyURL = "socks5://127.0.0.1:20173"
 
 type Candidate struct {
@@ -299,7 +300,7 @@ func signLocalJWT(db *sql.DB) (string, error) {
 	headerJSON := "{\"alg\":\"HS256\",\"typ\":\"JWT\"}"
 	header := base64.RawURLEncoding.EncodeToString([]byte(headerJSON))
 	payloadBytes, _ := json.Marshal(map[string]any{
-		"uname": "v2raya-failover",
+		"uname": "vpn-guardian",
 		"exp":   time.Now().Add(10 * time.Minute).Unix(),
 	})
 	payload := base64.RawURLEncoding.EncodeToString(payloadBytes)
@@ -1152,7 +1153,7 @@ func saveState(s State) { b, _ := json.Marshal(s); _ = os.WriteFile(statePath, b
 func note(f string, a ...any) {
 	msg := fmt.Sprintf(f, a...)
 	log.Print(msg)
-	_ = exec.Command("logger", "-t", "v2raya-failover", msg).Run()
+	_ = exec.Command("logger", "-t", "vpn-guardian-control", msg).Run()
 }
 
 func syncTproxyHostRules() error {
@@ -1548,12 +1549,12 @@ func setByName(q string) error {
 	return fmt.Errorf("no node matching %q", q)
 }
 
-// Run executes the v2rayA control-plane compatibility command.
+// Run executes the vpn-guardian control command.
 func Run(args []string) {
 	oldArgs := os.Args
 	oldFlags := flag.CommandLine
 	flag.CommandLine = flag.NewFlagSet("vpn-guardian control", flag.ExitOnError)
-	os.Args = append([]string{"v2raya-failover"}, args...)
+	os.Args = append([]string{"vpn-guardian control"}, args...)
 	defer func() {
 		os.Args = oldArgs
 		flag.CommandLine = oldFlags
@@ -1677,7 +1678,7 @@ func Snapshot(includeSecrets bool) (FrontSnapshot, error) {
 	return out, nil
 }
 
-const frontControlLockPath = "/tmp/vpn-backend-watchdog.lock"
+const frontControlLockPath = "/tmp/vpn-guardian-control.lock"
 
 func withFrontControlLock(fn func() error) error {
 	f, err := os.OpenFile(frontControlLockPath, os.O_CREATE|os.O_RDWR, 0600)
@@ -1708,135 +1709,7 @@ func applyFrontPolicy(c Control) error {
 	if mode != "killswitch" && mode != "failopen" && mode != "direct" {
 		return fmt.Errorf("invalid front policy %q", mode)
 	}
-	out, err := exec.Command("/usr/bin/vpn-policy-mode", mode).CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("vpn-policy-mode %s: %w: %s", mode, err, strings.TrimSpace(string(out)))
-	}
-	return nil
-}
-
-// EnsureBackendOnly makes v2rayA a backend-only SOCKS provider for vpn-front.
-// It is idempotent and deliberately does not require an active subscription/node:
-// a package can be installed before the user imports VPN credentials.
-func EnsureBackendOnly() error {
-	return withFrontControlLock(func() error {
-		if !processAlive("v2raya") {
-			if err := service("start"); err != nil {
-				return fmt.Errorf("start v2rayA: %w", err)
-			}
-		}
-
-		deadline := time.Now().Add(15 * time.Second)
-		var currentMode string
-		for time.Now().Before(deadline) {
-			db, err := openDB()
-			if err == nil {
-				currentMode, err = transparent(db)
-				db.Close()
-				if err == nil {
-					break
-				}
-			}
-			time.Sleep(250 * time.Millisecond)
-		}
-		if currentMode == "" {
-			return errors.New("v2rayA database/setting did not become ready")
-		}
-		if currentMode == "close" {
-			return syncTproxyHostRules()
-		}
-
-		if err := service("stop"); err != nil {
-			return err
-		}
-		if err := waitStopped(20 * time.Second); err != nil {
-			_ = service("start")
-			return err
-		}
-
-		db, err := openDB()
-		if err != nil {
-			_ = service("start")
-			return err
-		}
-		err = setTransparent(db, "close")
-		if err == nil {
-			err = enforceTproxy(db)
-		}
-		if err == nil {
-			err = putRaw(db, "system:running", "true")
-		}
-		db.Close()
-		if err != nil {
-			_ = service("start")
-			return err
-		}
-
-		if err := service("start"); err != nil {
-			return err
-		}
-
-		deadline = time.Now().Add(20 * time.Second)
-		for time.Now().Before(deadline) {
-			db, openErr := openDB()
-			if openErr == nil {
-				mode, modeErr := transparent(db)
-				db.Close()
-				if modeErr == nil && mode == "close" && processAlive("v2raya") {
-					return syncTproxyHostRules()
-				}
-			}
-			time.Sleep(250 * time.Millisecond)
-		}
-		return errors.New("v2rayA did not enter backend-only mode")
-	})
-}
-
-// BackendSOCKSReady reports whether v2rayA currently exposes its local SOCKS
-// endpoint. Bootstrap uses it to decide whether a full VPN self-test is
-// possible without making backend availability a prerequisite for install.
-func BackendSOCKSReady() bool {
-	conn, err := net.DialTimeout("tcp", "127.0.0.1:20173", 500*time.Millisecond)
-	if err != nil {
-		return false
-	}
-	_ = conn.Close()
-	return true
-}
-
-// BackendUsable verifies that the listening SOCKS backend can actually reach
-// the Internet through the selected VPN node. A listener alone is not enough:
-// v2rayA may expose the port before a usable node has been selected.
-func BackendUsable() bool {
-	if !BackendSOCKSReady() {
-		return false
-	}
-	p, err := url.Parse(proxyURL)
-	if err != nil {
-		return false
-	}
-	tr := &http.Transport{
-		Proxy:               http.ProxyURL(p),
-		TLSHandshakeTimeout: 3 * time.Second,
-	}
-	defer tr.CloseIdleConnections()
-	client := &http.Client{Transport: tr, Timeout: 5 * time.Second}
-
-	for _, endpoint := range []string{"https://api.ipify.org", "https://icanhazip.com"} {
-		resp, err := client.Get(endpoint)
-		if err != nil {
-			continue
-		}
-		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 256))
-		_ = resp.Body.Close()
-		if readErr != nil || resp.StatusCode >= 500 {
-			continue
-		}
-		if net.ParseIP(strings.TrimSpace(string(body))) != nil {
-			return true
-		}
-	}
-	return false
+	return policy.Apply(mode)
 }
 
 func SetAutoFront() error {

@@ -23,9 +23,8 @@ GO_PKG_BUILD_PKG:=$(GO_PKG)/cmd/vpn-guardian
 include $(INCLUDE_DIR)/package.mk
 include $(TOPDIR)/feeds/packages/lang/golang/golang-package.mk
 
-# vpn-guardian is pure Go. Force an internal-link, CGO-free target build so
-# the package does not depend on the SDK libc ABI or a target C toolchain.
-# GOOS/GOARCH/GOARM/GOMIPS continue to come from OpenWrt's Go helper.
+# vpn-guardian is pure Go. OpenWrt still supplies the target GOOS/GOARCH
+# values, but CGO and the external C linker are deliberately disabled.
 GO_PKG_TARGET_VARS:=$(filter-out CGO_ENABLED=%,$(GO_PKG_TARGET_VARS)) CGO_ENABLED=0
 GO_PKG_DEFAULT_LDFLAGS:=$(filter-out -linkmode external,$(GO_PKG_DEFAULT_LDFLAGS))
 
@@ -38,8 +37,9 @@ define Package/vpn-guardian
   CATEGORY:=Network
   SUBMENU:=VPN
   TITLE:=Selective VPN control plane for v2rayA
-  DEPENDS:=$(ARCH_DEPENDS) +v2raya +xray-core +v2ray-geosite +v2ray-geoip +ca-bundle +ip-full +kmod-nft-core +kmod-nft-socket +kmod-nft-tproxy +nftables-json +nginx-ssl
+  DEPENDS:=$(ARCH_DEPENDS) +v2raya +xray-core +v2ray-geosite +ca-bundle +ip-full +kmod-nft-tproxy +nftables-json
 endef
+
 define Package/vpn-guardian/description
  Selective VPN routing, health monitoring and automatic v2rayA failover.
  Direct traffic remains independent from VPN backend health.
@@ -47,14 +47,6 @@ endef
 
 define Package/vpn-guardian/install
 	$(call GoPackage/Package/Install/Bin,$(1))
-
-	$(INSTALL_DIR) $(1)/usr/bin
-	$(LN) vpn-guardian $(1)/usr/bin/vpn-stack
-	$(LN) vpn-guardian $(1)/usr/bin/vpn-selftest
-	$(LN) vpn-guardian $(1)/usr/bin/vpn-backend-watchdog
-	$(LN) vpn-guardian $(1)/usr/bin/vpn-status-collector
-	$(LN) vpn-guardian $(1)/usr/bin/v2raya-failover
-	$(INSTALL_BIN) ./files/usr/bin/vpn-policy-mode $(1)/usr/bin/vpn-policy-mode
 
 	$(INSTALL_DIR) $(1)/etc/init.d
 	$(INSTALL_BIN) ./files/etc/init.d/vpn-front $(1)/etc/init.d/vpn-front
@@ -65,46 +57,19 @@ define Package/vpn-guardian/install
 	$(INSTALL_DIR) $(1)/etc/hotplug.d/iface
 	$(INSTALL_BIN) ./files/etc/hotplug.d/iface/99-vpn-front-routing $(1)/etc/hotplug.d/iface/99-vpn-front-routing
 
+	# Optional GL.iNet/OpenWrt nginx integration. nginx is not a dependency;
+	# vpn-guardian serves the same UI directly on LAN port 20175.
 	$(INSTALL_DIR) $(1)/etc/nginx/conf.d
 	$(INSTALL_CONF) ./files/etc/nginx/conf.d/vpn-guardian.conf $(1)/etc/nginx/conf.d/vpn-guardian.conf
 
-	$(INSTALL_DIR) $(1)/etc/vpn-stack
 	$(INSTALL_DIR) $(1)/usr/share/vpn-guardian/examples
 	$(INSTALL_DATA) $(PKG_BUILD_DIR)/configs/stack.example.json $(1)/usr/share/vpn-guardian/examples/stack.json
 	$(INSTALL_DATA) $(PKG_BUILD_DIR)/configs/routing.example.json $(1)/usr/share/vpn-guardian/examples/routing.json
-
-	$(INSTALL_DIR) $(1)/www/vpn-dashboard
-	$(INSTALL_DATA) $(PKG_BUILD_DIR)/dashboard/index.html $(1)/www/vpn-dashboard/index.html
-
-	$(INSTALL_DIR) $(1)/www/cgi-bin
-	$(LN) ../../usr/bin/vpn-guardian $(1)/www/cgi-bin/vpn-status
-	$(LN) ../../usr/bin/vpn-guardian $(1)/www/cgi-bin/vpn-history
-	$(LN) ../../usr/bin/vpn-guardian $(1)/www/cgi-bin/vpn-control
-endef
-
-define Package/vpn-guardian/preinst
-#!/bin/sh
-[ -n "$$IPKG_INSTROOT" ] && exit 0
-
-if [ -e /www/cgi-bin/vpn-control ] && [ ! -L /www/cgi-bin/vpn-control ] && [ ! -e /www/cgi-bin/vpn-control.legacy ]; then
-	cp -p /www/cgi-bin/vpn-control /www/cgi-bin/vpn-control.legacy
-fi
-
-if [ -f /etc/nginx/conf.d/vpn-dashboard.conf ] && grep -q 'server_name vpn.home.arpa' /etc/nginx/conf.d/vpn-dashboard.conf; then
-	mkdir -p /etc/vpn-stack/legacy
-	cp -p /etc/nginx/conf.d/vpn-dashboard.conf /etc/vpn-stack/legacy/vpn-dashboard.conf
-fi
-
-exit 0
 endef
 
 define Package/vpn-guardian/postinst
 #!/bin/sh
 [ -n "$$IPKG_INSTROOT" ] && exit 0
-
-if [ -f /etc/nginx/conf.d/vpn-dashboard.conf ] && grep -q 'server_name vpn.home.arpa' /etc/nginx/conf.d/vpn-dashboard.conf; then
-	rm -f /etc/nginx/conf.d/vpn-dashboard.conf
-fi
 
 rm -f /etc/vpn-stack/bootstrap-complete
 /etc/init.d/vpn-guardian-bootstrap enable >/dev/null 2>&1 || true
@@ -117,13 +82,14 @@ define Package/vpn-guardian/prerm
 #!/bin/sh
 [ -n "$$IPKG_INSTROOT" ] && exit 0
 
+/usr/bin/vpn-guardian cleanup >/dev/null 2>&1 || true
+
 for svc in vpn-guardian-bootstrap vpn-guardian-api vpn-dashboard-collector vpn-backend-watchdog vpn-front-routing vpn-front vpn-policy; do
 	[ -x "/etc/init.d/$$svc" ] || continue
 	"/etc/init.d/$$svc" disable >/dev/null 2>&1 || true
 	"/etc/init.d/$$svc" stop >/dev/null 2>&1 || true
 done
 
-rm -f /etc/vpn-front-enabled
 exit 0
 endef
 
@@ -131,10 +97,18 @@ define Package/vpn-guardian/postrm
 #!/bin/sh
 [ -n "$$IPKG_INSTROOT" ] && exit 0
 
-uci -q delete dhcp.vpn_guardian
-uci -q commit dhcp
-/etc/init.d/dnsmasq reload >/dev/null 2>&1 || true
-/etc/init.d/nginx reload >/dev/null 2>&1 || true
+rm -f /etc/init.d/vpn-front-routing
+rm -f /etc/init.d/vpn-backend-watchdog
+rm -f /etc/init.d/vpn-dashboard-collector
+rm -f /etc/vpn-front.nft
+
+if [ -x /etc/init.d/dnsmasq ]; then
+	uci -q delete dhcp.vpn_guardian
+	uci -q commit dhcp
+	/etc/init.d/dnsmasq reload >/dev/null 2>&1 || true
+fi
+
+[ -x /etc/init.d/nginx ] && /etc/init.d/nginx reload >/dev/null 2>&1 || true
 
 exit 0
 endef
