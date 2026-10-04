@@ -193,10 +193,10 @@ func runHealthyProduction(rep *Report) {
 	add(rep, "healthy direct stays home", err == nil && direct == homeIP,
 		fmt.Sprintf("ip=%s err=%v", direct, err))
 
-	chatIP, err := fetchTraceIPViaSocks(prodFrontSocks, 6*time.Second)
-	add(rep, "healthy proxy leaves via VPN",
-		err == nil && chatIP != "" && chatIP != homeIP,
-		fmt.Sprintf("ip=%s err=%v", chatIP, err))
+	vpnIP, err := fetchHomeIPViaSocks("127.0.0.1:20173", 6*time.Second)
+	add(rep, "healthy VPN backend leaves via VPN",
+		err == nil && vpnIP != "" && vpnIP != homeIP,
+		fmt.Sprintf("ip=%s err=%v", vpnIP, err))
 }
 func fetchHomeIPViaSocks(socksAddr string, timeout time.Duration) (string, error) {
 	urls := []string{"https://api.ipify.org", "https://icanhazip.com", "https://ifconfig.me/ip"}
@@ -219,19 +219,6 @@ func fetchIPViaSocks(socksAddr, url string, timeout time.Duration) (string, erro
 		return "", err
 	}
 	return strings.TrimSpace(string(b)), nil
-}
-
-func fetchTraceIPViaSocks(socksAddr string, timeout time.Duration) (string, error) {
-	b, err := fetchViaSocks(socksAddr, "https://chatgpt.com/cdn-cgi/trace", timeout)
-	if err != nil {
-		return "", err
-	}
-	for _, line := range strings.Split(string(b), "\n") {
-		if strings.HasPrefix(line, "ip=") {
-			return strings.TrimSpace(strings.TrimPrefix(line, "ip=")), nil
-		}
-	}
-	return "", errors.New("trace response missing ip=")
 }
 
 func fetchViaSocks(socksAddr, url string, timeout time.Duration) ([]byte, error) {
@@ -379,6 +366,25 @@ func prepareFront(cfg map[string]any) {
 			s["port"] = testPolicyPort
 		}
 	}
+
+	// Isolated policy tests need one deterministic proxy-class destination that
+	// is also reachable without VPN. This makes fail-open semantics testable
+	// without depending on a service that may itself be blocked by the ISP.
+	cfg["routing"] = map[string]any{
+		"domainStrategy": "AsIs",
+		"rules": []any{
+			map[string]any{
+				"type":        "field",
+				"domain":      []string{"domain:api.ipify.org"},
+				"outboundTag": "policy-gateway",
+			},
+			map[string]any{
+				"type":        "field",
+				"network":     "tcp,udp",
+				"outboundTag": "direct",
+			},
+		},
+	}
 }
 
 func preparePolicy(cfg map[string]any) {
@@ -404,14 +410,14 @@ func preparePolicy(cfg map[string]any) {
 	}
 }
 func runFailopenChecks(rep *Report) {
-	direct, err := fetchHomeIPViaSocks("127.0.0.1:20179", 4*time.Second)
+	direct, err := fetchIPViaSocks("127.0.0.1:20179", "https://icanhazip.com", 4*time.Second)
 	add(rep, "failopen direct stays home", err == nil && direct == homeIP,
 		fmt.Sprintf("ip=%s err=%v", direct, err))
 
 	deadline := time.Now().Add(15 * time.Second)
 	var ip string
 	for time.Now().Before(deadline) {
-		ip, err = fetchTraceIPViaSocks("127.0.0.1:20179", 4*time.Second)
+		ip, err = fetchIPViaSocks("127.0.0.1:20179", "https://api.ipify.org", 4*time.Second)
 		if err == nil && ip == homeIP {
 			break
 		}
@@ -422,26 +428,26 @@ func runFailopenChecks(rep *Report) {
 }
 
 func runVPNOnlyChecks(rep *Report) {
-	direct, err := fetchHomeIPViaSocks("127.0.0.1:20179", 4*time.Second)
+	direct, err := fetchIPViaSocks("127.0.0.1:20179", "https://icanhazip.com", 4*time.Second)
 	add(rep, "vpn-only direct stays home with dead backend", err == nil && direct == homeIP,
 		fmt.Sprintf("ip=%s err=%v", direct, err))
 
 	start := time.Now()
-	ip, err := fetchTraceIPViaSocks("127.0.0.1:20179", 4*time.Second)
+	ip, err := fetchIPViaSocks("127.0.0.1:20179", "https://api.ipify.org", 4*time.Second)
 	dur := time.Since(start)
 	add(rep, "vpn-only proxy fails closed without direct fallback", err != nil && ip != homeIP,
 		fmt.Sprintf("ip=%s failed_in=%s err=%v", ip, dur.Round(time.Millisecond), err))
 }
 
 func runBlockedChecks(rep *Report) {
-	direct, err := fetchHomeIPViaSocks("127.0.0.1:20179", 4*time.Second)
-	add(rep, "killswitch direct stays home", err == nil && direct == homeIP,
+	direct, err := fetchIPViaSocks("127.0.0.1:20179", "https://icanhazip.com", 4*time.Second)
+	add(rep, "emergency block direct stays home", err == nil && direct == homeIP,
 		fmt.Sprintf("ip=%s err=%v", direct, err))
 
 	start := time.Now()
-	_, err = fetchTraceIPViaSocks("127.0.0.1:20179", 2*time.Second)
+	_, err = fetchIPViaSocks("127.0.0.1:20179", "https://api.ipify.org", 2*time.Second)
 	dur := time.Since(start)
-	add(rep, "killswitch proxy blocked", err != nil && dur < 1500*time.Millisecond,
+	add(rep, "emergency block rejects proxy class", err != nil && dur < 1500*time.Millisecond,
 		fmt.Sprintf("blocked_in=%s err=%v", dur.Round(time.Millisecond), err))
 }
 func loadJSON(path string) (map[string]any, error) {
