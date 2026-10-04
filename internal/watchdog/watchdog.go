@@ -22,6 +22,8 @@ import (
 	"sync"
 	"time"
 
+	v2rayautil "github.com/Yakwilik/openwrt-vpn-guardian/internal/v2raya"
+
 	"golang.org/x/net/proxy"
 	"golang.org/x/sys/unix"
 	_ "modernc.org/sqlite"
@@ -68,15 +70,16 @@ type NodeStats struct {
 }
 
 type State struct {
-	Failures    int                  `json:"failures"`
-	LastCheck   int64                `json:"lastCheck"`
-	LastHealthy int64                `json:"lastHealthy,omitempty"`
-	LastFailure int64                `json:"lastFailure,omitempty"`
-	LastSwitch  int64                `json:"lastSwitch,omitempty"`
-	LastNode    string               `json:"lastNode,omitempty"`
-	LastError   string               `json:"lastError,omitempty"`
-	LastHealth  HealthResult         `json:"lastHealth"`
-	Nodes       map[string]NodeStats `json:"nodes,omitempty"`
+	Failures       int                  `json:"failures"`
+	LastCheck      int64                `json:"lastCheck"`
+	LastHealthy    int64                `json:"lastHealthy,omitempty"`
+	LastFailure    int64                `json:"lastFailure,omitempty"`
+	LastSwitch     int64                `json:"lastSwitch,omitempty"`
+	LastNode       string               `json:"lastNode,omitempty"`
+	LastFailedNode string               `json:"lastFailedNode,omitempty"`
+	LastError      string               `json:"lastError,omitempty"`
+	LastHealth     HealthResult         `json:"lastHealth"`
+	Nodes          map[string]NodeStats `json:"nodes,omitempty"`
 }
 
 type RankedCandidate struct {
@@ -244,22 +247,8 @@ func candidates(db *sql.DB) ([]Candidate, error) {
 		network := strings.ToLower(str(obj, "net", "network"))
 		security := strings.ToLower(str(obj, "tls", "security"))
 		name := str(obj, "ps", "name", "remarks")
-		priority := 999
-		if protoName == "vless" && network == "tcp" && security == "reality" {
-			priority = 100 + s
-		} else if protoName == "vless" && network == "xhttp" && security == "reality" {
-			// Secondary subscription: modern XHTTP + Reality nodes.
-			// Keep them behind the explicitly preferred TCP + Reality nodes,
-			// but ahead of generic legacy fallbacks.
-			priority = 40 + s
-		} else if protoName == "hysteria2" {
-			priority = 20 + s
-		} else if protoName == "shadowsocks" {
-			priority = 60 + s
-		} else if protoName == "vless" && network == "ws" && security == "tls" {
-			// Secondary subscription CDN/whitelist fallback nodes.
-			priority = 80 + s
-		} else {
+		priority, eligible := v2rayautil.CandidatePriority(protoName, network, security, s)
+		if !eligible {
 			continue
 		}
 
@@ -313,7 +302,7 @@ func current(db *sql.DB) (id, sub int, ok bool) {
 }
 
 func loadControl() Control {
-	c := Control{Mode: "auto", FailurePolicy: "failopen"}
+	c := Control{Mode: "auto", FailurePolicy: "killswitch"}
 	b, err := os.ReadFile(controlPath)
 	if err == nil {
 		_ = json.Unmarshal(b, &c)
@@ -322,7 +311,7 @@ func loadControl() Control {
 		c.Mode = "auto"
 	}
 	if c.FailurePolicy == "" {
-		c.FailurePolicy = "failopen"
+		c.FailurePolicy = "killswitch"
 	}
 	return c
 }
@@ -877,6 +866,7 @@ func run(logHealthy bool) error {
 		s.Failures = 2
 		if activeKnown {
 			markCandidateFailure(&s, active)
+			s.LastFailedNode = active.Name
 			st := s.Nodes[candidateKey(active)]
 			logLine("active node cooldown until %d after %d consecutive failures: %s", st.CooldownUntil, st.ConsecutiveFailures, active.Name)
 		}
@@ -901,6 +891,7 @@ func run(logHealthy bool) error {
 		}
 		if err := setCandidate(r.Candidate); err != nil {
 			markCandidateFailure(&s, r.Candidate)
+			s.LastFailedNode = r.Name
 			saveState(s)
 			logLine("switch failed id=%d sub=%d: %v", r.TouchID, r.Sub, err)
 			return false
@@ -909,6 +900,7 @@ func run(logHealthy bool) error {
 		s.LastHealth = h
 		if !h.Healthy {
 			markCandidateFailure(&s, r.Candidate)
+			s.LastFailedNode = r.Name
 			saveState(s)
 			st := s.Nodes[candidateKey(r.Candidate)]
 			logLine("candidate unhealthy id=%d sub=%d; cooldown until %d: %s", r.TouchID, r.Sub, st.CooldownUntil, healthSummary(h))

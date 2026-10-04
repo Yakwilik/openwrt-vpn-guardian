@@ -28,21 +28,7 @@ const (
 	lockPath            = "/tmp/vpn-selftest.lock"
 )
 
-var homeIP = configuredHomeIP()
-
-func configuredHomeIP() string {
-	var cfg struct {
-		HomeIP string `json:"homeIp"`
-	}
-	b, err := os.ReadFile("/etc/vpn-stack/stack.json")
-	if err != nil {
-		return ""
-	}
-	if err := json.Unmarshal(b, &cfg); err != nil {
-		return ""
-	}
-	return strings.TrimSpace(cfg.HomeIP)
-}
+var homeIP string
 
 type Check struct {
 	Name   string `json:"name"`
@@ -190,7 +176,10 @@ func testJSONAPI(rep *Report, name, url string) {
 
 func runHealthyProduction(rep *Report) {
 	direct, err := fetchHomeIPViaSocks(prodFrontSocks, 4*time.Second)
-	add(rep, "healthy direct stays home", err == nil && direct == homeIP,
+	if err == nil && direct != "" {
+		homeIP = direct
+	}
+	add(rep, "healthy direct egress discovered", err == nil && homeIP != "",
 		fmt.Sprintf("ip=%s err=%v", direct, err))
 
 	vpnIP, err := fetchHomeIPViaSocks("127.0.0.1:20173", 6*time.Second)

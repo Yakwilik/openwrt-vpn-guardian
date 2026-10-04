@@ -1,0 +1,53 @@
+#!/bin/sh
+set -e
+
+MODE="$1"
+case "$MODE" in
+  failopen|killswitch|direct) PUBLIC="$MODE" ;;
+  killswitch-blocked) PUBLIC="killswitch" ;;
+  status)
+    cat /etc/vpn-policy-mode 2>/dev/null || echo killswitch
+    exit 0
+    ;;
+  runtime)
+    cat /etc/vpn-policy-runtime 2>/dev/null || cat /etc/vpn-policy-mode 2>/dev/null || echo killswitch
+    exit 0
+    ;;
+  *)
+    echo "usage: vpn-policy-mode {failopen|killswitch|killswitch-blocked|direct|status|runtime}" >&2
+    exit 2
+    ;;
+esac
+
+SRC="/etc/xray/vpn-policy-\${MODE}.json"
+[ -f "$SRC" ] || {
+  echo "missing $SRC" >&2
+  exit 1
+}
+
+/usr/bin/xray run -test -config "$SRC" >/tmp/vpn-policy-test.log 2>&1
+
+cp "$SRC" /etc/xray/vpn-policy.json.new
+chmod 0600 /etc/xray/vpn-policy.json.new
+mv -f /etc/xray/vpn-policy.json.new /etc/xray/vpn-policy.json
+
+oldpid=$(pgrep -f '^/usr/bin/xray run -config /etc/xray/vpn-policy.json$' | head -n 1)
+/etc/init.d/vpn-policy restart
+
+i=0
+while [ "$i" -lt 25 ]; do
+  newpid=$(pgrep -f '^/usr/bin/xray run -config /etc/xray/vpn-policy.json$' | head -n 1)
+  if [ -n "$newpid" ] && { [ -z "$oldpid" ] || [ "$newpid" != "$oldpid" ]; } && netstat -lnt 2>/dev/null | grep -q ':20177 '; then
+    /etc/init.d/vpn-policy status >/dev/null
+    if [ "$MODE" != killswitch-blocked ]; then
+      printf '%s\n' "$PUBLIC" > /etc/vpn-policy-mode
+    fi
+    printf '%s\n' "$MODE" > /etc/vpn-policy-runtime
+    exit 0
+  fi
+  i=$((i+1))
+  sleep 0.1
+done
+
+echo "vpn-policy did not restart cleanly on 20177" >&2
+exit 1

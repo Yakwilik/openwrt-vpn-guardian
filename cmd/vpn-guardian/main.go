@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/Yakwilik/openwrt-vpn-guardian/internal/api"
+	"github.com/Yakwilik/openwrt-vpn-guardian/internal/collector"
 	"github.com/Yakwilik/openwrt-vpn-guardian/internal/control"
 	"github.com/Yakwilik/openwrt-vpn-guardian/internal/selftest"
 	"github.com/Yakwilik/openwrt-vpn-guardian/internal/stack"
@@ -27,6 +29,18 @@ func main() {
 	case "v2raya-failover":
 		control.Run(args)
 		return
+	case "vpn-status-collector":
+		collector.Run(args)
+		return
+	case "vpn-status":
+		api.StatusCGI()
+		return
+	case "vpn-history":
+		api.HistoryCGI()
+		return
+	case "vpn-control":
+		api.ControlCGI()
+		return
 	}
 
 	if len(args) == 0 {
@@ -43,7 +57,11 @@ func main() {
 		selftest.Run(args[1:])
 	case "control":
 		control.Run(args[1:])
-	case "status", "validate", "apply", "backup", "restore":
+	case "collector":
+		collector.Run(args[1:])
+	case "api":
+		api.Run(args[1:])
+	case "bootstrap", "init", "status", "validate", "apply", "backup", "restore":
 		stack.Run(args)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n", args[0])
@@ -56,8 +74,12 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "vpn-guardian - selective VPN control plane for OpenWrt")
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "Usage:")
+	fmt.Fprintln(os.Stderr, "  vpn-guardian bootstrap [--dry-run]")
+	fmt.Fprintln(os.Stderr, "  vpn-guardian init [--dry-run] [--force]")
 	fmt.Fprintln(os.Stderr, "  vpn-guardian status|validate|apply|backup|restore <archive>")
 	fmt.Fprintln(os.Stderr, "  vpn-guardian selftest")
 	fmt.Fprintln(os.Stderr, "  vpn-guardian watchdog [legacy watchdog flags]")
 	fmt.Fprintln(os.Stderr, "  vpn-guardian control [legacy control flags]")
+	fmt.Fprintln(os.Stderr, "  vpn-guardian collector -mode collect -interval 3s")
+	fmt.Fprintln(os.Stderr, "  vpn-guardian api status|history|control")
 }

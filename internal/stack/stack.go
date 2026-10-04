@@ -8,24 +8,27 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Yakwilik/openwrt-vpn-guardian/internal/control"
 )
 
 const (
-	stackDir    = "/etc/vpn-stack"
-	stackPath   = stackDir + "/stack.json"
-	routingPath = stackDir + "/routing.json"
-	backupDir   = stackDir + "/backups"
+	stackDir        = "/etc/vpn-stack"
+	stackPath       = stackDir + "/stack.json"
+	routingPath     = stackDir + "/routing.json"
+	backupDir       = stackDir + "/backups"
+	bootstrapMarker = stackDir + "/bootstrap-complete"
 )
 
 type Stack struct {
 	Version      int    `json:"version"`
-	HomeIP       string `json:"homeIp"`
 	LANInterface string `json:"lanInterface"`
 	LANCIDR      string `json:"lanCidr"`
 	WANInterface string `json:"wanInterface"`
@@ -74,6 +77,33 @@ func main() {
 	}
 	var err error
 	switch os.Args[1] {
+	case "bootstrap":
+		dryRun := false
+		if len(os.Args) > 2 {
+			if len(os.Args) == 3 && os.Args[2] == "--dry-run" {
+				dryRun = true
+			} else {
+				err = fmt.Errorf("unknown bootstrap options %q", os.Args[2:])
+			}
+		}
+		if err == nil {
+			err = bootstrapCmd(dryRun)
+		}
+	case "init":
+		force, dryRun := false, false
+		for _, arg := range os.Args[2:] {
+			switch arg {
+			case "--force":
+				force = true
+			case "--dry-run":
+				dryRun = true
+			default:
+				err = fmt.Errorf("unknown init option %q", arg)
+			}
+		}
+		if err == nil {
+			err = initCmd(force, dryRun)
+		}
 	case "status":
 		err = statusCmd()
 	case "validate":
@@ -104,8 +134,368 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: vpn-stack {status|validate|apply|backup|restore <archive>|selftest}")
+	fmt.Fprintln(os.Stderr, "usage: vpn-stack {bootstrap [--dry-run]|init [--dry-run] [--force]|status|validate|apply|backup|restore <archive>|selftest}")
 	os.Exit(2)
+}
+
+func bootstrapCmd(dryRun bool) error {
+	if os.Geteuid() != 0 {
+		return errors.New("bootstrap must run as root")
+	}
+	if err := checkBootstrapDependencies(); err != nil {
+		return err
+	}
+	_, stackErr := os.Stat(stackPath)
+	_, routingErr := os.Stat(routingPath)
+	stackExists := stackErr == nil
+	routingExists := routingErr == nil
+
+	if dryRun {
+		lan := detectLANInterface()
+		wan := detectWANInterface()
+		lanCIDR := ""
+		lanIP := ""
+		if lan != "" {
+			lanCIDR = detectLANCIDR(lan)
+			lanIP = detectLANAddress(lan)
+		}
+		if stackExists && routingExists {
+			if err := validateCmd(); err != nil {
+				return fmt.Errorf("validate manifests: %w", err)
+			}
+		}
+		socksReady := control.BackendSOCKSReady()
+		backendUsable := control.BackendUsable()
+		plan := map[string]any{
+			"dryRun":             true,
+			"stackManifest":      stackExists,
+			"routingManifest":    routingExists,
+			"lanInterface":       lan,
+			"lanCIDR":            lanCIDR,
+			"lanAddress":         lanIP,
+			"wanInterface":       wan,
+			"dashboardDNS":       "vpn.home.arpa",
+			"backendSOCKSReady":  socksReady,
+			"backendUsable":      backendUsable,
+			"wouldActivateFront": backendUsable && stackExists && routingExists,
+		}
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(plan)
+	}
+
+	if err := os.MkdirAll(stackDir, 0700); err != nil {
+		return err
+	}
+
+	switch {
+	case !stackExists && !routingExists:
+		if err := initCmd(false, false); err != nil {
+			return fmt.Errorf("initialize manifests: %w", err)
+		}
+	case stackExists != routingExists:
+		return errors.New("only one manifest exists; restore the missing manifest or run init --force explicitly")
+	}
+
+	if err := validateCmd(); err != nil {
+		return fmt.Errorf("validate manifests: %w", err)
+	}
+	if err := ensureV2rayAService(); err != nil {
+		return err
+	}
+	if err := control.EnsureBackendOnly(); err != nil {
+		return fmt.Errorf("configure v2rayA backend-only mode: %w", err)
+	}
+	if err := setupDashboardDNS(); err != nil {
+		return fmt.Errorf("configure dashboard DNS: %w", err)
+	}
+	if err := setupDashboardRuntime(); err != nil {
+		return fmt.Errorf("configure dashboard runtime: %w", err)
+	}
+
+	if !control.BackendUsable() {
+		_ = os.Remove(bootstrapMarker)
+		fmt.Println("bootstrap pending: v2rayA backend is not usable through SOCKS 127.0.0.1:20173")
+		fmt.Println("front remains inactive; the bootstrap service will retry automatically")
+		return nil
+	}
+
+	if err := applyCmd(); err != nil {
+		return fmt.Errorf("activate generated stack: %w", err)
+	}
+	if err := setupDashboardRuntime(); err != nil {
+		return fmt.Errorf("reload dashboard after activation: %w", err)
+	}
+	if err := os.WriteFile(bootstrapMarker, []byte(time.Now().Format(time.RFC3339)+"\n"), 0600); err != nil {
+		return fmt.Errorf("write bootstrap marker: %w", err)
+	}
+	fmt.Println("bootstrap OK")
+	return nil
+}
+
+func checkBootstrapDependencies() error {
+	required := []string{"xray", "v2raya", "nginx", "fcgiwrap", "nft", "ip", "uci", "ubus"}
+	var missing []string
+	for _, name := range required {
+		if _, err := exec.LookPath(name); err != nil {
+			missing = append(missing, name)
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("missing runtime dependencies: %s", strings.Join(missing, ", "))
+	}
+	return nil
+}
+
+func ensureV2rayAService() error {
+	if out, err := run("uci", "-q", "set", "v2raya.config.enabled=1"); err != nil {
+		return fmt.Errorf("enable v2rayA in UCI: %v: %s", err, out)
+	}
+	if out, err := run("uci", "-q", "commit", "v2raya"); err != nil {
+		return fmt.Errorf("commit v2rayA UCI: %v: %s", err, out)
+	}
+	if out, err := run("/etc/init.d/v2raya", "enable"); err != nil {
+		return fmt.Errorf("enable v2rayA service: %v: %s", err, out)
+	}
+	if !serviceRunning("v2raya") {
+		if out, err := run("/etc/init.d/v2raya", "start"); err != nil {
+			return fmt.Errorf("start v2rayA service: %v: %s", err, out)
+		}
+	}
+
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat("/etc/v2raya/v2raya.db"); err == nil {
+			return nil
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	return errors.New("v2rayA database did not become ready")
+}
+
+func detectLANAddress(iface string) string {
+	out, err := run("ip", "-4", "-o", "addr", "show", "dev", iface)
+	if err != nil {
+		return ""
+	}
+	fields := strings.Fields(out)
+	for i := 0; i+1 < len(fields); i++ {
+		if fields[i] == "inet" {
+			if ip, _, err := net.ParseCIDR(fields[i+1]); err == nil {
+				return ip.String()
+			}
+		}
+	}
+	return ""
+}
+
+func setupDashboardDNS() error {
+	s, _, err := loadConfig()
+	if err != nil {
+		return err
+	}
+	lanIP := detectLANAddress(s.LANInterface)
+	if lanIP == "" {
+		return fmt.Errorf("cannot determine LAN address for %s", s.LANInterface)
+	}
+
+	commands := [][]string{
+		{"-q", "delete", "dhcp.vpn_guardian"},
+		{"set", "dhcp.vpn_guardian=domain"},
+		{"set", "dhcp.vpn_guardian.name=vpn.home.arpa"},
+		{"set", "dhcp.vpn_guardian.ip=" + lanIP},
+	}
+	for i, args := range commands {
+		out, cmdErr := run("uci", args...)
+		if i == 0 && cmdErr != nil {
+			continue
+		}
+		if cmdErr != nil {
+			return fmt.Errorf("uci %s: %v: %s", strings.Join(args, " "), cmdErr, out)
+		}
+	}
+	if out, err := run("uci", "commit", "dhcp"); err != nil {
+		return fmt.Errorf("commit dashboard DNS: %v: %s", err, out)
+	}
+	if out, err := run("/etc/init.d/dnsmasq", "reload"); err != nil {
+		return fmt.Errorf("reload dnsmasq: %v: %s", err, out)
+	}
+	return nil
+}
+
+func setupDashboardRuntime() error {
+	if out, err := run("/etc/init.d/fcgiwrap", "enable"); err != nil {
+		return fmt.Errorf("enable fcgiwrap: %v: %s", err, out)
+	}
+	if !serviceRunning("fcgiwrap") {
+		if out, err := run("/etc/init.d/fcgiwrap", "start"); err != nil {
+			return fmt.Errorf("start fcgiwrap: %v: %s", err, out)
+		}
+	}
+	if out, err := run("nginx", "-t", "-c", "/etc/nginx/nginx.conf"); err != nil {
+		return fmt.Errorf("nginx config invalid: %v: %s", err, out)
+	}
+	if out, err := run("/etc/init.d/nginx", "reload"); err != nil {
+		return fmt.Errorf("reload nginx: %v: %s", err, out)
+	}
+	return nil
+}
+
+func initCmd(force, dryRun bool) error {
+	if !force && !dryRun {
+		if _, err := os.Stat(stackPath); err == nil {
+			return fmt.Errorf("%s already exists; use init --force to replace manifests", stackPath)
+		}
+		if _, err := os.Stat(routingPath); err == nil {
+			return fmt.Errorf("%s already exists; use init --force to replace manifests", routingPath)
+		}
+	}
+
+	lan := detectLANInterface()
+	if lan == "" {
+		return errors.New("unable to detect LAN interface")
+	}
+	lanCIDR := detectLANCIDR(lan)
+	if lanCIDR == "" {
+		return fmt.Errorf("unable to detect IPv4 CIDR for LAN interface %s", lan)
+	}
+	wan := detectWANInterface()
+	if wan == "" {
+		return errors.New("unable to detect WAN interface")
+	}
+
+	assetsDir := "/usr/share/xray"
+	if _, err := os.Stat(filepath.Join(assetsDir, "geosite.dat")); err != nil {
+		if _, err := os.Stat("/usr/share/v2ray/geosite.dat"); err == nil {
+			assetsDir = "/usr/share/v2ray"
+		}
+	}
+
+	var s Stack
+	s.Version = 1
+	s.LANInterface = lan
+	s.LANCIDR = lanCIDR
+	s.WANInterface = wan
+	s.AssetsDir = assetsDir
+	s.Front.SocksPort = 20174
+	s.Front.TProxyPort = 52346
+	s.Front.PolicyPort = 20177
+	s.Front.Mark = 192
+	s.Front.RouteTable = 101
+	s.Front.DirectSocketMark = 128
+	s.Backend.SocksPort = 20173
+	s.Backend.WatchdogInterval = "10s"
+	s.Dashboard.CollectorInterval = "3s"
+	s.Policy.Default = "killswitch"
+	s.Policy.ProbeURL = "https://connectivitycheck.gstatic.com/generate_204"
+	s.Policy.ProbeInterval = "5s"
+	s.Bypass4 = []string{
+		"0.0.0.0/8",
+		"10.0.0.0/8",
+		"100.64.0.0/10",
+		"127.0.0.0/8",
+		"169.254.0.0/16",
+		"172.16.0.0/12",
+		"192.168.0.0/16",
+		"224.0.0.0/3",
+	}
+
+	r := Routing{
+		Version: 1,
+		ProxyDomains: []string{
+			"geosite:openai",
+			"geosite:anthropic",
+			"geosite:google-gemini",
+			"geosite:github",
+			"geosite:youtube",
+			"geosite:telegram",
+			"geosite:whatsapp",
+			"geosite:soundcloud",
+			"geosite:linkedin",
+			"domain:buf.build",
+		},
+	}
+
+	if dryRun {
+		out := struct {
+			Stack   Stack   `json:"stack"`
+			Routing Routing `json:"routing"`
+		}{Stack: s, Routing: r}
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(out)
+	}
+
+	if err := os.MkdirAll(stackDir, 0700); err != nil {
+		return err
+	}
+	if err := jsonWrite(stackPath, s); err != nil {
+		return err
+	}
+	if err := jsonWrite(routingPath, r); err != nil {
+		return err
+	}
+
+	fmt.Printf("initialized %s and %s\n", stackPath, routingPath)
+	fmt.Printf("detected lan=%s cidr=%s wan=%s assets=%s\n", lan, lanCIDR, wan, assetsDir)
+	fmt.Println("next: vpn-guardian validate && vpn-guardian apply")
+	return nil
+}
+
+func detectLANInterface() string {
+	for _, key := range []string{"network.lan.device", "network.lan.ifname"} {
+		if out, err := run("uci", "-q", "get", key); err == nil && strings.TrimSpace(out) != "" {
+			return strings.Fields(out)[0]
+		}
+	}
+	if _, err := os.Stat("/sys/class/net/br-lan"); err == nil {
+		return "br-lan"
+	}
+	return ""
+}
+
+func detectLANCIDR(iface string) string {
+	out, err := run("ip", "-4", "-o", "addr", "show", "dev", iface)
+	if err != nil {
+		return ""
+	}
+	fields := strings.Fields(out)
+	for i := 0; i+1 < len(fields); i++ {
+		if fields[i] == "inet" {
+			_, network, err := net.ParseCIDR(fields[i+1])
+			if err == nil {
+				return network.String()
+			}
+			return fields[i+1]
+		}
+	}
+	return ""
+}
+
+func detectWANInterface() string {
+	if out, err := run("ubus", "call", "network.interface.wan", "status"); err == nil {
+		var st struct {
+			L3Device string `json:"l3_device"`
+			Device   string `json:"device"`
+		}
+		if json.Unmarshal([]byte(out), &st) == nil {
+			if st.L3Device != "" {
+				return st.L3Device
+			}
+			if st.Device != "" {
+				return st.Device
+			}
+		}
+	}
+	if out, err := run("ip", "-4", "route", "show", "default"); err == nil {
+		fields := strings.Fields(out)
+		for i := 0; i+1 < len(fields); i++ {
+			if fields[i] == "dev" {
+				return fields[i+1]
+			}
+		}
+	}
+	return ""
 }
 
 func loadConfig() (Stack, Routing, error) {
@@ -310,10 +700,10 @@ func makeWatchdogInit(s Stack) string {
 		"USE_PROCD=1",
 		"START=99",
 		"STOP=6",
-		"PROG=/usr/bin/vpn-backend-watchdog",
+		"PROG=/usr/bin/vpn-guardian",
 		"start_service() {",
 		"  procd_open_instance vpn-backend-watchdog",
-		fmt.Sprintf("  procd_set_param command \"$PROG\" -mode daemon -interval %s", s.Backend.WatchdogInterval),
+		fmt.Sprintf("  procd_set_param command \"$PROG\" watchdog -mode daemon -interval %s", s.Backend.WatchdogInterval),
 		"  procd_set_param stdout 1",
 		"  procd_set_param stderr 1",
 		"  procd_set_param respawn 5 5 0",
@@ -331,10 +721,10 @@ func makeCollectorInit(s Stack) string {
 		"USE_PROCD=1",
 		"START=99",
 		"STOP=7",
-		"PROG=/usr/bin/vpn-status-collector",
+		"PROG=/usr/bin/vpn-guardian",
 		"start_service() {",
 		"  procd_open_instance vpn-dashboard-collector",
-		fmt.Sprintf("  procd_set_param command \"$PROG\" -mode collect -interval %s", s.Dashboard.CollectorInterval),
+		fmt.Sprintf("  procd_set_param command \"$PROG\" collector -mode collect -interval %s", s.Dashboard.CollectorInterval),
 		"  procd_set_param stdout 1",
 		"  procd_set_param stderr 1",
 		"  procd_set_param respawn 5 5 0",
@@ -406,6 +796,9 @@ func applyCmd() error {
 	}
 	fmt.Println("snapshot:", snapshot)
 
+	_, markerErr := os.Stat("/etc/vpn-front-enabled")
+	frontWasEnabled := markerErr == nil
+
 	files := map[string]string{
 		"vpn-front.json":                     "/etc/xray/vpn-front.json",
 		"vpn-policy-failopen.json":           "/etc/xray/vpn-policy-failopen.json",
@@ -423,27 +816,67 @@ func applyCmd() error {
 			mode = 0755
 		}
 		if err := copyAtomic(filepath.Join(dir, src), dst, mode); err != nil {
-			_ = restore(snapshot, false)
+			rollbackApply(snapshot, frontWasEnabled)
 			return err
 		}
 	}
+	if err := os.WriteFile("/etc/vpn-front-enabled", nil, 0644); err != nil {
+		rollbackApply(snapshot, frontWasEnabled)
+		return fmt.Errorf("enable front marker: %w", err)
+	}
 	if err := restartStack(); err != nil {
-		_ = restore(snapshot, false)
+		rollbackApply(snapshot, frontWasEnabled)
 		return fmt.Errorf("restart after apply: %w", err)
 	}
 	if err := runSelftest(); err != nil {
-		_ = restore(snapshot, false)
+		rollbackApply(snapshot, frontWasEnabled)
 		return fmt.Errorf("selftest failed; rolled back: %w", err)
+	}
+	if err := enableStackServices(); err != nil {
+		rollbackApply(snapshot, frontWasEnabled)
+		return fmt.Errorf("enabling boot services failed; rolled back: %w", err)
 	}
 	fmt.Println("apply OK")
 	return nil
 }
-func restartStack() error {
-	for _, svc := range []string{"vpn-front", "vpn-front-routing", "vpn-backend-watchdog", "vpn-dashboard-collector"} {
-		if out, err := run("/etc/init.d/"+svc, "restart"); err != nil {
-			return fmt.Errorf("restart %s: %v: %s", svc, err, out)
+func rollbackApply(snapshot string, frontWasEnabled bool) {
+	if !frontWasEnabled {
+		for _, svc := range []string{"vpn-dashboard-collector", "vpn-backend-watchdog", "vpn-front-routing", "vpn-front", "vpn-policy"} {
+			_, _ = run("/etc/init.d/"+svc, "stop")
+		}
+		_ = exec.Command("nft", "delete", "table", "inet", "vpn_front").Run()
+		for i := 0; i < 4; i++ {
+			_ = exec.Command("ip", "rule", "del", "priority", "5").Run()
+		}
+		if s, _, err := loadConfig(); err == nil && s.Front.RouteTable > 0 {
+			_ = exec.Command("ip", "route", "flush", "table", strconv.Itoa(s.Front.RouteTable)).Run()
+		}
+		_ = os.Remove("/etc/vpn-front-enabled")
+	}
+
+	_ = restore(snapshot, false)
+
+	if frontWasEnabled {
+		_ = restartStack()
+	}
+}
+
+func enableStackServices() error {
+	for _, svc := range []string{
+		"vpn-policy",
+		"vpn-front",
+		"vpn-front-routing",
+		"vpn-backend-watchdog",
+		"vpn-dashboard-collector",
+	} {
+		if out, err := run("/etc/init.d/"+svc, "enable"); err != nil {
+			return fmt.Errorf("enable %s: %v: %s", svc, err, out)
 		}
 	}
+	return nil
+}
+
+func restartStack() error {
 	mode := strings.TrimSpace(readFile("/etc/vpn-policy-mode"))
 	if mode != "killswitch" && mode != "failopen" && mode != "direct" {
 		s, _, err := loadConfig()
@@ -454,6 +887,12 @@ func restartStack() error {
 	}
 	if out, err := run("/usr/bin/vpn-policy-mode", mode); err != nil {
 		return fmt.Errorf("vpn-policy-mode %s: %v: %s", mode, err, out)
+	}
+
+	for _, svc := range []string{"vpn-front", "vpn-front-routing", "vpn-backend-watchdog", "vpn-dashboard-collector"} {
+		if out, err := run("/etc/init.d/"+svc, "restart"); err != nil {
+			return fmt.Errorf("restart %s: %v: %s", svc, err, out)
+		}
 	}
 	return nil
 }
@@ -502,6 +941,7 @@ var backupFiles = []string{
 	"/etc/init.d/vpn-dashboard-collector",
 	"/etc/hotplug.d/iface/99-vpn-front-routing",
 	"/usr/bin/vpn-policy-mode",
+	"/usr/bin/vpn-guardian",
 	"/usr/bin/vpn-backend-watchdog",
 	"/usr/bin/vpn-selftest",
 	"/usr/bin/vpn-status-collector",
@@ -720,7 +1160,13 @@ func installExtracted(dir string) error {
 }
 
 func runSelftest() error {
-	out, err := run("/usr/bin/vpn-selftest")
+	binary := "/usr/bin/vpn-guardian"
+	args := []string{"selftest"}
+	if _, err := os.Stat(binary); err != nil {
+		binary = "/usr/bin/vpn-selftest"
+		args = nil
+	}
+	out, err := run(binary, args...)
 	if err != nil {
 		return fmt.Errorf("%v: %s", err, out)
 	}

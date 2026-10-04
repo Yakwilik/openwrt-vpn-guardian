@@ -20,9 +20,13 @@ import (
 	"os"
 	"os/exec"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
+	v2rayautil "github.com/Yakwilik/openwrt-vpn-guardian/internal/v2raya"
+
+	"golang.org/x/sys/unix"
 	_ "modernc.org/sqlite"
 )
 
@@ -33,7 +37,7 @@ const proxyURL = "socks5://127.0.0.1:20173"
 
 type Candidate struct {
 	TouchID, Sub, SubscriptionID, Priority, Sort int
-	Name, Protocol, Network, Security            string
+	Name, Protocol, Network, Security, Address   string
 }
 type State struct {
 	Failures           int
@@ -209,21 +213,14 @@ func candidates(db *sql.DB) ([]Candidate, error) {
 		network := strings.ToLower(str(obj, "net", "network"))
 		security := strings.ToLower(str(obj, "tls", "security"))
 		name := str(obj, "ps", "name", "remarks")
-		pri := 999
-		if proto == "vless" && network == "tcp" && security == "reality" {
-			preferred := []string{"Германия", "Польша", "Нидерланды", "Финляндия-1", "Швеция", "Швейцария-1"}
-			pri = 100 + s
-			for i, pattern := range preferred {
-				if strings.Contains(name, pattern) {
-					pri = i + 1
-					break
-				}
-			}
-		} else if proto == "hysteria2" {
-			pri = 20 + s
-		} else if proto == "shadowsocks" {
-			pri = 60 + s
-		} else {
+		host := str(obj, "add", "address", "host")
+		port := str(obj, "port")
+		address := host
+		if host != "" && port != "" {
+			address = host + ":" + port
+		}
+		pri, eligible := v2rayautil.CandidatePriority(proto, network, security, s)
+		if !eligible {
 			continue
 		}
 		sub := 0
@@ -232,7 +229,7 @@ func candidates(db *sql.DB) ([]Candidate, error) {
 			actualSubID = int(subID.Int64)
 			sub = subOrd[actualSubID]
 		}
-		out = append(out, Candidate{TouchID: s + 1, Sub: sub, SubscriptionID: actualSubID, Priority: pri, Sort: s, Name: name, Protocol: proto, Network: network, Security: security})
+		out = append(out, Candidate{TouchID: s + 1, Sub: sub, SubscriptionID: actualSubID, Priority: pri, Sort: s, Name: name, Protocol: proto, Network: network, Security: security, Address: address})
 	}
 	sort.SliceStable(out, func(i, j int) bool {
 		if out[i].Priority != out[j].Priority {
@@ -434,7 +431,7 @@ func latencyAll() (any, error) {
 }
 
 func loadControl() Control {
-	c := Control{Mode: "auto", FailurePolicy: "failopen"}
+	c := Control{Mode: "auto", FailurePolicy: "killswitch"}
 	if b, err := os.ReadFile(controlPath); err == nil {
 		_ = json.Unmarshal(b, &c)
 	}
@@ -442,7 +439,7 @@ func loadControl() Control {
 		c.Mode = "auto"
 	}
 	if c.FailurePolicy != "killswitch" && c.FailurePolicy != "failopen" {
-		c.FailurePolicy = "failopen"
+		c.FailurePolicy = "killswitch"
 	}
 	return c
 }
@@ -509,7 +506,6 @@ func setTouchRaw(id, sub int) error {
 	if !ok || aid != id || asub != sub {
 		return fmt.Errorf("v2rayA selected id=%d sub=%d, expected id=%d sub=%d", aid, asub, id, sub)
 	}
-	fmt.Printf("selected raw id=%d sub=%d\n", id, sub)
 	return nil
 }
 
@@ -1563,4 +1559,467 @@ func Run(args []string) {
 		flag.CommandLine = oldFlags
 	}()
 	main()
+}
+
+// NodeInfo is the dashboard-safe representation of a v2rayA node.
+type NodeInfo struct {
+	ID             int    `json:"id"`
+	Sub            int    `json:"sub"`
+	SubscriptionID int    `json:"subscriptionId"`
+	Name           string `json:"name"`
+	Net            string `json:"net"`
+	Address        string `json:"address"`
+	PingLatency    string `json:"pingLatency"`
+	Active         bool   `json:"active"`
+	Pinned         bool   `json:"pinned"`
+}
+
+// SubscriptionInfo is the dashboard representation of a v2rayA subscription.
+type SubscriptionInfo struct {
+	ID         int    `json:"id"`
+	Address    string `json:"address"`
+	Host       string `json:"host"`
+	Info       string `json:"info"`
+	Remarks    string `json:"remarks"`
+	AutoSelect bool   `json:"autoSelect"`
+	NodeCount  int    `json:"nodeCount"`
+}
+
+type ActiveNode struct {
+	ID  int `json:"id"`
+	Sub int `json:"sub"`
+}
+
+type FrontSnapshot struct {
+	Control        Control            `json:"control"`
+	Active         ActiveNode         `json:"active"`
+	Nodes          []NodeInfo         `json:"nodes"`
+	Subscriptions  []SubscriptionInfo `json:"subscriptions"`
+	FrontEnabled   bool               `json:"frontEnabled"`
+	HardKillSwitch bool               `json:"hardKillSwitch"`
+	PolicyMode     string             `json:"policyMode"`
+}
+
+func Snapshot(includeSecrets bool) (FrontSnapshot, error) {
+	var out FrontSnapshot
+	out.Control = loadControl()
+	out.FrontEnabled = fileExists("/etc/vpn-front-enabled")
+	out.HardKillSwitch = false
+	out.PolicyMode = strings.TrimSpace(readSmallFile("/etc/vpn-policy-mode"))
+
+	db, err := openDB()
+	if err != nil {
+		return out, err
+	}
+	cs, err := candidates(db)
+	if err != nil {
+		db.Close()
+		return out, err
+	}
+	activeID, activeSub, _ := current(db)
+	db.Close()
+	out.Active = ActiveNode{ID: activeID, Sub: activeSub}
+
+	ping := map[string]string{}
+	touch, touchErr := touchData()
+	if touchErr == nil {
+		if t, ok := touch["touch"].(map[string]any); ok {
+			if subs, ok := t["subscriptions"].([]any); ok {
+				for si, rawSub := range subs {
+					sm, ok := rawSub.(map[string]any)
+					if !ok {
+						continue
+					}
+					sub := SubscriptionInfo{
+						ID:         intValue(sm["id"]),
+						Host:       fmt.Sprint(sm["host"]),
+						Info:       fmt.Sprint(sm["info"]),
+						Remarks:    fmt.Sprint(sm["remarks"]),
+						AutoSelect: boolValue(sm["autoSelect"]),
+					}
+					if includeSecrets {
+						sub.Address = fmt.Sprint(sm["address"])
+					}
+					if servers, ok := sm["servers"].([]any); ok {
+						sub.NodeCount = len(servers)
+						for _, rawServer := range servers {
+							vm, ok := rawServer.(map[string]any)
+							if !ok {
+								continue
+							}
+							id := intValue(vm["id"])
+							ping[fmt.Sprintf("%d:%d", si, id)] = fmt.Sprint(vm["pingLatency"])
+						}
+					}
+					out.Subscriptions = append(out.Subscriptions, sub)
+				}
+			}
+		}
+	}
+
+	for _, c := range cs {
+		netLabel := c.Protocol
+		if c.Network != "" || c.Security != "" {
+			netLabel = fmt.Sprintf("%s(%s+%s)", c.Protocol, c.Network, c.Security)
+		}
+		out.Nodes = append(out.Nodes, NodeInfo{
+			ID:             c.TouchID,
+			Sub:            c.Sub,
+			SubscriptionID: c.SubscriptionID,
+			Name:           c.Name,
+			Net:            netLabel,
+			Address:        c.Address,
+			PingLatency:    ping[fmt.Sprintf("%d:%d", c.Sub, c.TouchID)],
+			Active:         c.TouchID == activeID && c.Sub == activeSub,
+			Pinned:         isPinned(out.Control, c),
+		})
+	}
+	return out, nil
+}
+
+const frontControlLockPath = "/tmp/vpn-backend-watchdog.lock"
+
+func withFrontControlLock(fn func() error) error {
+	f, err := os.OpenFile(frontControlLockPath, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX); err != nil {
+		return err
+	}
+	defer unix.Flock(int(f.Fd()), unix.LOCK_UN)
+	return fn()
+}
+
+func clearPin(c *Control) {
+	c.PinName = ""
+	c.PinProtocol = ""
+	c.PinNetwork = ""
+	c.PinSecurity = ""
+	c.PinSubscriptionID = 0
+}
+
+func applyFrontPolicy(c Control) error {
+	mode := c.FailurePolicy
+	if c.Mode == "direct" {
+		mode = "direct"
+	}
+	if mode != "killswitch" && mode != "failopen" && mode != "direct" {
+		return fmt.Errorf("invalid front policy %q", mode)
+	}
+	out, err := exec.Command("/usr/bin/vpn-policy-mode", mode).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("vpn-policy-mode %s: %w: %s", mode, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// EnsureBackendOnly makes v2rayA a backend-only SOCKS provider for vpn-front.
+// It is idempotent and deliberately does not require an active subscription/node:
+// a package can be installed before the user imports VPN credentials.
+func EnsureBackendOnly() error {
+	return withFrontControlLock(func() error {
+		if !processAlive("v2raya") {
+			if err := service("start"); err != nil {
+				return fmt.Errorf("start v2rayA: %w", err)
+			}
+		}
+
+		deadline := time.Now().Add(15 * time.Second)
+		var currentMode string
+		for time.Now().Before(deadline) {
+			db, err := openDB()
+			if err == nil {
+				currentMode, err = transparent(db)
+				db.Close()
+				if err == nil {
+					break
+				}
+			}
+			time.Sleep(250 * time.Millisecond)
+		}
+		if currentMode == "" {
+			return errors.New("v2rayA database/setting did not become ready")
+		}
+		if currentMode == "close" {
+			return syncTproxyHostRules()
+		}
+
+		if err := service("stop"); err != nil {
+			return err
+		}
+		if err := waitStopped(20 * time.Second); err != nil {
+			_ = service("start")
+			return err
+		}
+
+		db, err := openDB()
+		if err != nil {
+			_ = service("start")
+			return err
+		}
+		err = setTransparent(db, "close")
+		if err == nil {
+			err = enforceTproxy(db)
+		}
+		if err == nil {
+			err = putRaw(db, "system:running", "true")
+		}
+		db.Close()
+		if err != nil {
+			_ = service("start")
+			return err
+		}
+
+		if err := service("start"); err != nil {
+			return err
+		}
+
+		deadline = time.Now().Add(20 * time.Second)
+		for time.Now().Before(deadline) {
+			db, openErr := openDB()
+			if openErr == nil {
+				mode, modeErr := transparent(db)
+				db.Close()
+				if modeErr == nil && mode == "close" && processAlive("v2raya") {
+					return syncTproxyHostRules()
+				}
+			}
+			time.Sleep(250 * time.Millisecond)
+		}
+		return errors.New("v2rayA did not enter backend-only mode")
+	})
+}
+
+// BackendSOCKSReady reports whether v2rayA currently exposes its local SOCKS
+// endpoint. Bootstrap uses it to decide whether a full VPN self-test is
+// possible without making backend availability a prerequisite for install.
+func BackendSOCKSReady() bool {
+	conn, err := net.DialTimeout("tcp", "127.0.0.1:20173", 500*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
+}
+
+// BackendUsable verifies that the listening SOCKS backend can actually reach
+// the Internet through the selected VPN node. A listener alone is not enough:
+// v2rayA may expose the port before a usable node has been selected.
+func BackendUsable() bool {
+	if !BackendSOCKSReady() {
+		return false
+	}
+	p, err := url.Parse(proxyURL)
+	if err != nil {
+		return false
+	}
+	tr := &http.Transport{
+		Proxy:               http.ProxyURL(p),
+		TLSHandshakeTimeout: 3 * time.Second,
+	}
+	defer tr.CloseIdleConnections()
+	client := &http.Client{Transport: tr, Timeout: 5 * time.Second}
+
+	for _, endpoint := range []string{"https://api.ipify.org", "https://icanhazip.com"} {
+		resp, err := client.Get(endpoint)
+		if err != nil {
+			continue
+		}
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 256))
+		_ = resp.Body.Close()
+		if readErr != nil || resp.StatusCode >= 500 {
+			continue
+		}
+		if net.ParseIP(strings.TrimSpace(string(body))) != nil {
+			return true
+		}
+	}
+	return false
+}
+
+func SetAutoFront() error {
+	return withFrontControlLock(func() error {
+		c := loadControl()
+		c.Mode = "auto"
+		clearPin(&c)
+		if err := saveControl(c); err != nil {
+			return err
+		}
+		return applyFrontPolicy(c)
+	})
+}
+
+func SetDirectFront() error {
+	return withFrontControlLock(func() error {
+		c := loadControl()
+		c.Mode = "direct"
+		clearPin(&c)
+		if err := saveControl(c); err != nil {
+			return err
+		}
+		return applyFrontPolicy(c)
+	})
+}
+
+func PinFront(id, sub int) error {
+	return withFrontControlLock(func() error {
+		candidate, err := candidateByTouch(id, sub)
+		if err != nil {
+			return err
+		}
+		if err := setTouchRaw(id, sub); err != nil {
+			return err
+		}
+		c := loadControl()
+		c.Mode = "pinned"
+		c.PinName = candidate.Name
+		c.PinProtocol = candidate.Protocol
+		c.PinNetwork = candidate.Network
+		c.PinSecurity = candidate.Security
+		c.PinSubscriptionID = candidate.SubscriptionID
+		if err := saveControl(c); err != nil {
+			return err
+		}
+		return applyFrontPolicy(c)
+	})
+}
+
+func SwitchFront(id, sub int) error {
+	return withFrontControlLock(func() error {
+		if _, err := candidateByTouch(id, sub); err != nil {
+			return err
+		}
+		if err := setTouchRaw(id, sub); err != nil {
+			return err
+		}
+		c := loadControl()
+		c.Mode = "auto"
+		clearPin(&c)
+		if err := saveControl(c); err != nil {
+			return err
+		}
+		return applyFrontPolicy(c)
+	})
+}
+
+func SetFailurePolicyFront(policy string) error {
+	if policy != "killswitch" && policy != "failopen" {
+		return fmt.Errorf("invalid failure policy %q", policy)
+	}
+	return withFrontControlLock(func() error {
+		c := loadControl()
+		c.FailurePolicy = policy
+		if err := saveControl(c); err != nil {
+			return err
+		}
+		return applyFrontPolicy(c)
+	})
+}
+
+func AddSubscription(address string) error {
+	if strings.TrimSpace(address) == "" {
+		return errors.New("subscription URL required")
+	}
+	return withFrontControlLock(func() error {
+		_, err := apiCall(http.MethodPost, "import", map[string]any{
+			"url":  strings.TrimSpace(address),
+			"kind": "subscription",
+		}, 120*time.Second)
+		return err
+	})
+}
+
+func UpdateSubscription(id int) error {
+	if id <= 0 {
+		return errors.New("subscription id required")
+	}
+	return withFrontControlLock(func() error {
+		_, err := apiCall(http.MethodPut, "subscription", map[string]any{
+			"_type": "subscription",
+			"id":    id,
+		}, 120*time.Second)
+		return err
+	})
+}
+
+func EditSubscription(id int, address, remarks string, autoSelect bool) error {
+	if id <= 0 || strings.TrimSpace(address) == "" {
+		return errors.New("subscription id and URL required")
+	}
+	return withFrontControlLock(func() error {
+		return editSubscription(id, strings.TrimSpace(address), remarks, autoSelect)
+	})
+}
+
+func DeleteSubscription(id int) error {
+	if id <= 0 {
+		return errors.New("subscription id required")
+	}
+	return withFrontControlLock(func() error {
+		_, err := apiCall(http.MethodDelete, "touch", map[string]any{
+			"touches": []any{map[string]any{"_type": "subscription", "id": id}},
+		}, 30*time.Second)
+		return err
+	})
+}
+
+func TestLatency() (any, error) {
+	var result any
+	err := withFrontControlLock(func() error {
+		var err error
+		result, err = latencyAll()
+		return err
+	})
+	return result, err
+}
+
+func isPinned(c Control, node Candidate) bool {
+	return c.Mode == "pinned" &&
+		(c.PinSubscriptionID == 0 || c.PinSubscriptionID == node.SubscriptionID) &&
+		c.PinName == node.Name &&
+		c.PinProtocol == node.Protocol &&
+		c.PinNetwork == node.Network &&
+		c.PinSecurity == node.Security
+}
+
+func intValue(v any) int {
+	switch x := v.(type) {
+	case float64:
+		return int(x)
+	case int:
+		return x
+	case json.Number:
+		n, _ := strconv.Atoi(string(x))
+		return n
+	case string:
+		n, _ := strconv.Atoi(x)
+		return n
+	default:
+		return 0
+	}
+}
+
+func boolValue(v any) bool {
+	switch x := v.(type) {
+	case bool:
+		return x
+	case string:
+		return x == "true" || x == "1"
+	case float64:
+		return x != 0
+	default:
+		return false
+	}
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+func readSmallFile(path string) string {
+	b, _ := os.ReadFile(path)
+	return string(b)
 }

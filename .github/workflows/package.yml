@@ -1,0 +1,73 @@
+name: OpenWrt package
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["main"]
+    paths:
+      - "cmd/**"
+      - "internal/**"
+      - "dashboard/**"
+      - "configs/**"
+      - "package/openwrt/**"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/package.yml"
+  pull_request:
+    paths:
+      - "cmd/**"
+      - "internal/**"
+      - "dashboard/**"
+      - "configs/**"
+      - "package/openwrt/**"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/package.yml"
+
+env:
+  OPENWRT_VERSION: "24.10.4"
+  OPENWRT_TARGET: "mediatek"
+  OPENWRT_SUBTARGET: "filogic"
+  SDK_FILE: "openwrt-sdk-24.10.4-mediatek-filogic_gcc-13.3.0_musl.Linux-x86_64.tar.zst"
+  SDK_SHA256: "b9762b8e1c8e114b0e6a252b98e94e6e4a1d2496beb9f6044c26227a8d78dee0"
+
+jobs:
+  ipk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install host tools
+        run: sudo apt-get update && sudo apt-get install -y zstd rsync
+
+      - name: Download OpenWrt SDK
+        run: |
+          curl -fL --retry 3             -o /tmp/openwrt-sdk.tar.zst             "https://downloads.openwrt.org/releases/${OPENWRT_VERSION}/targets/${OPENWRT_TARGET}/${OPENWRT_SUBTARGET}/${SDK_FILE}"
+          echo "${SDK_SHA256}  /tmp/openwrt-sdk.tar.zst" | sha256sum -c -
+          mkdir -p /tmp/openwrt-sdk
+          tar --zstd -xf /tmp/openwrt-sdk.tar.zst -C /tmp/openwrt-sdk --strip-components=1
+
+      - name: Prepare feeds and package
+        working-directory: /tmp/openwrt-sdk
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          rm -rf package/vpn-guardian
+          cp -a "${GITHUB_WORKSPACE}/package/openwrt" package/vpn-guardian
+          make defconfig
+
+      - name: Build vpn-guardian ipk
+        working-directory: /tmp/openwrt-sdk
+        run: |
+          make package/vpn-guardian/compile V=s USE_SOURCE_DIR="${GITHUB_WORKSPACE}"
+
+      - name: Collect package
+        run: |
+          mkdir -p dist
+          find /tmp/openwrt-sdk/bin -type f -name 'vpn-guardian_*.ipk' -exec cp -v {} dist/ \;
+          test -n "$(find dist -type f -name 'vpn-guardian_*.ipk' -print -quit)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vpn-guardian-openwrt-24.10.4-filogic
+          path: dist/*.ipk
