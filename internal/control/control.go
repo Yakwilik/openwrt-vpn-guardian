@@ -1476,45 +1476,6 @@ type NodeInfo struct {
 	Pinned         bool   `json:"pinned"`
 }
 
-// SubscriptionInfo is the dashboard representation of a v2rayA subscription.
-type SubscriptionInfo struct {
-	ID         int    `json:"id"`
-	Name       string `json:"name"`
-	Address    string `json:"address"`
-	Host       string `json:"host"`
-	Info       string `json:"info"`
-	Remarks    string `json:"remarks"`
-	AutoSelect bool   `json:"autoSelect"`
-	NodeCount  int    `json:"nodeCount"`
-}
-
-func subscriptionInfoFromMap(sm map[string]any, includeSecrets bool) SubscriptionInfo {
-	sub := SubscriptionInfo{
-		ID:         intValue(sm["id"]),
-		Host:       strings.TrimSpace(str(sm, "host")),
-		Info:       strings.TrimSpace(str(sm, "info")),
-		Remarks:    strings.TrimSpace(str(sm, "remarks")),
-		AutoSelect: boolValue(sm["autoSelect"]),
-	}
-
-	if includeSecrets {
-		sub.Address = strings.TrimSpace(str(sm, "address"))
-	}
-	if servers, ok := sm["servers"].([]any); ok {
-		sub.NodeCount = len(servers)
-	}
-
-	switch {
-	case sub.Remarks != "":
-		sub.Name = sub.Remarks
-	case sub.Host != "":
-		sub.Name = sub.Host
-	default:
-		sub.Name = fmt.Sprintf("Subscription #%d", sub.ID)
-	}
-	return sub
-}
-
 type ActiveNode struct {
 	ID  int `json:"id"`
 	Sub int `json:"sub"`
