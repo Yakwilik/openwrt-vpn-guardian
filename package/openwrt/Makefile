@@ -54,7 +54,7 @@ define Package/vpn-guardian/conffiles
 endef
 
 define Build/Prepare
-	@printf '%s\n' "$(PKG_SOURCE_VERSION)" | grep -Eq '^[0-9a-f]{40}$$' || { echo 'PKG_SOURCE_VERSION must be a full commit hash' >&2; exit 1; }
+	@printf '%s\n' "$(PKG_SOURCE_VERSION)" | grep -Exq '[0-9a-f]{40}' || { echo 'PKG_SOURCE_VERSION must be a full commit hash' >&2; exit 1; }
 	$(call Build/Prepare/Default)
 endef
 
