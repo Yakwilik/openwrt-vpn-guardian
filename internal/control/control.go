@@ -19,11 +19,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Yakwilik/openwrt-vpn-guardian/internal/lockfile"
 	"github.com/Yakwilik/openwrt-vpn-guardian/internal/paths"
 	"github.com/Yakwilik/openwrt-vpn-guardian/internal/policy"
 	v2rayautil "github.com/Yakwilik/openwrt-vpn-guardian/internal/v2raya"
-
-	"golang.org/x/sys/unix"
 )
 
 const dbPath = "/etc/v2raya/v2raya.db"
@@ -1583,15 +1582,13 @@ func Snapshot(includeSecrets bool) (FrontSnapshot, error) {
 const frontControlLockPath = paths.ControlLock
 
 func withFrontControlLock(fn func() error) error {
-	f, err := os.OpenFile(frontControlLockPath, os.O_CREATE|os.O_RDWR, 0600)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	f, err := lockfile.Acquire(ctx, frontControlLockPath)
 	if err != nil {
-		return err
+		return fmt.Errorf("acquire control lock: %w", err)
 	}
-	defer f.Close()
-	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX); err != nil {
-		return err
-	}
-	defer unix.Flock(int(f.Fd()), unix.LOCK_UN)
+	defer lockfile.Release(f)
 	return fn()
 }
 

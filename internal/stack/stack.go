@@ -568,7 +568,7 @@ func generate(dir string, s Stack, r Routing) error {
 	}
 
 	front := map[string]any{
-		"log": map[string]any{"loglevel": "warning"},
+		"log": map[string]any{"loglevel": "warning", "access": "none"},
 		"inbounds": []any{
 			map[string]any{"tag": "front-socks", "listen": "127.0.0.1", "port": s.Front.SocksPort, "protocol": "socks", "settings": map[string]any{"udp": true}},
 			map[string]any{
@@ -579,13 +579,16 @@ func generate(dir string, s Stack, r Routing) error {
 			},
 		},
 		"outbounds": []any{
-			map[string]any{"tag": "direct", "protocol": "freedom", "streamSettings": map[string]any{"sockopt": map[string]any{"mark": s.Front.DirectSocketMark}}},
+			map[string]any{"tag": "direct", "protocol": "freedom", "settings": map[string]any{"domainStrategy": "UseIPv4"}, "streamSettings": map[string]any{"sockopt": map[string]any{"mark": s.Front.DirectSocketMark}}},
 			map[string]any{"tag": "policy-gateway", "protocol": "socks", "settings": map[string]any{"servers": []any{map[string]any{"address": "127.0.0.1", "port": s.Front.PolicyPort}}}},
 			map[string]any{"tag": "blocked", "protocol": "blackhole"},
 		},
 		"routing": map[string]any{
 			"domainStrategy": "AsIs",
 			"rules": []any{
+				// Locally originated probes have no original transparent destination.
+				// Never let dokodemo-door dial its own listener through freedom.
+				map[string]any{"type": "field", "inboundTag": []string{"front-tproxy"}, "ip": []string{"127.0.0.0/8", "::1/128"}, "outboundTag": "blocked"},
 				map[string]any{"type": "field", "domain": r.ProxyDomains, "outboundTag": "policy-gateway"},
 				map[string]any{"type": "field", "ip": r.ProxyIPs, "outboundTag": "policy-gateway"},
 				map[string]any{"type": "field", "network": "tcp,udp", "outboundTag": "direct"},
@@ -652,7 +655,7 @@ func makeXrayInit(instance, config, assets string, start, stop int) string {
 		"  procd_set_param limits nofile=\"1000000 1000000\"",
 		"  procd_set_param stdout 1",
 		"  procd_set_param stderr 1",
-		"  procd_set_param respawn",
+		"  procd_set_param respawn 60 2 0",
 		"  procd_close_instance",
 		"}",
 		"",
@@ -664,7 +667,7 @@ func makeXrayInit(instance, config, assets string, start, stop int) string {
 
 func commonOutbounds(s Stack) []any {
 	return []any{
-		map[string]any{"tag": "direct", "protocol": "freedom", "streamSettings": map[string]any{"sockopt": map[string]any{"mark": s.Front.DirectSocketMark}}},
+		map[string]any{"tag": "direct", "protocol": "freedom", "settings": map[string]any{"domainStrategy": "UseIPv4"}, "streamSettings": map[string]any{"sockopt": map[string]any{"mark": s.Front.DirectSocketMark}}},
 		map[string]any{"tag": "vpn-backend", "protocol": "socks", "settings": map[string]any{"servers": []any{map[string]any{"address": "127.0.0.1", "port": s.Backend.SocksPort}}}},
 		map[string]any{"tag": "blocked", "protocol": "blackhole", "settings": map[string]any{"response": map[string]any{"type": "http"}}},
 	}
@@ -700,7 +703,7 @@ func policyRoute(tag string) map[string]any {
 
 func makeNFT(s Stack) string {
 	var b strings.Builder
-	b.WriteString("table inet vpn_front {\n  set bypass4 {\n    type ipv4_addr\n    flags interval\n    elements = { ")
+	b.WriteString("add table inet vpn_front\ndelete table inet vpn_front\ntable inet vpn_front {\n  set bypass4 {\n    type ipv4_addr\n    flags interval\n    elements = { ")
 	for i, x := range s.Bypass4 {
 		if i > 0 {
 			b.WriteString(", ")
@@ -711,13 +714,19 @@ func makeNFT(s Stack) string {
 	b.WriteString("    type filter hook prerouting priority mangle - 10; policy accept;\n")
 	fmt.Fprintf(&b, "    iifname %q ip saddr %s ip daddr @bypass4 return\n", s.LANInterface, s.LANCIDR)
 	fmt.Fprintf(&b, "    iifname %q ip saddr %s meta nfproto ipv4 meta l4proto { tcp, udp } meta mark set 0x%x ct mark set meta mark tproxy ip to 127.0.0.1:%d accept\n", s.LANInterface, s.LANCIDR, s.Front.Mark, s.Front.TProxyPort)
+	// A missing transparent socket must not fall through to ordinary WAN
+	// forwarding or an unrelated HTTP listener on the router.
+	fmt.Fprintf(&b, "    iifname %q ip saddr %s meta nfproto ipv4 meta l4proto { tcp, udp } counter drop\n", s.LANInterface, s.LANCIDR)
+	b.WriteString("  }\n  chain forward_guard {\n    type filter hook forward priority filter - 10; policy accept;\n")
+	fmt.Fprintf(&b, "    iifname %q ip saddr %s ip daddr @bypass4 return\n", s.LANInterface, s.LANCIDR)
+	fmt.Fprintf(&b, "    iifname %q ip saddr %s meta mark & 0x%x == 0x%x counter drop\n", s.LANInterface, s.LANCIDR, s.Front.Mark, s.Front.Mark)
 	b.WriteString("  }\n}\n")
 	return b.String()
 }
 func makeRoutingInit(s Stack) string {
 	lines := []string{
 		"#!/bin/sh /etc/rc.common",
-		"START=99",
+		"START=96",
 		"STOP=5",
 		"",
 		"apply_rules() {",
@@ -727,11 +736,10 @@ func makeRoutingInit(s Stack) string {
 		"  uci -q commit network 2>/dev/null || true",
 		fmt.Sprintf("  while ip -4 rule del priority 9920 iif %q 2>/dev/null; do :; done", s.LANInterface),
 		fmt.Sprintf("  while ip -6 rule del priority 9920 iif %q 2>/dev/null; do :; done", s.LANInterface),
-		"  nft delete table inet vpn_front 2>/dev/null || true",
-		"  while ip rule del priority 5 2>/dev/null; do :; done",
-		fmt.Sprintf("  ip route flush table %d 2>/dev/null || true", s.Front.RouteTable),
-		fmt.Sprintf("  ip rule add priority 5 fwmark 0x%x/0x%x table %d", s.Front.Mark, s.Front.Mark, s.Front.RouteTable),
-		fmt.Sprintf("  ip route add local 0.0.0.0/0 dev lo table %d", s.Front.RouteTable),
+		// Install routes before interception. Reload replaces only our nft table
+		// in one transaction, never removing the VPN-only guard between loads.
+		fmt.Sprintf("  ip route replace local 0.0.0.0/0 dev lo table %d || return 1", s.Front.RouteTable),
+		fmt.Sprintf("  ip rule show | grep -q '^5:.*fwmark 0x%x/0x%x lookup %d$' || ip rule add priority 5 fwmark 0x%x/0x%x table %d || return 1", s.Front.Mark, s.Front.Mark, s.Front.RouteTable, s.Front.Mark, s.Front.Mark, s.Front.RouteTable),
 		fmt.Sprintf("  nft -f %q", paths.FrontNFT),
 		"}",
 		"start() { apply_rules; }",
@@ -739,7 +747,7 @@ func makeRoutingInit(s Stack) string {
 		"restart() { apply_rules; }",
 		"stop() {",
 		"  nft delete table inet vpn_front 2>/dev/null || true",
-		"  while ip rule del priority 5 2>/dev/null; do :; done",
+		fmt.Sprintf("  while ip rule del priority 5 fwmark 0x%x/0x%x table %d 2>/dev/null; do :; done", s.Front.Mark, s.Front.Mark, s.Front.RouteTable),
 		fmt.Sprintf("  ip route flush table %d 2>/dev/null || true", s.Front.RouteTable),
 		"}",
 		"",

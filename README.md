@@ -175,7 +175,7 @@ The OpenWrt SDK/IPK workflow is intentionally disabled during active development
 
 Direct traffic must continue to work when v2rayA is restarting, unhealthy or unavailable.
 
-In VPN-only mode only the proxy class fails closed. There is no global LAN blackhole.
+When the VPN backend fails in VPN-only mode, the proxy class fails closed while direct traffic continues through the front. If the shared front itself fails, interception is retained until automatic recovery; it must not be bypassed silently. Local management remains outside interception.
 
 Every apply creates a backup before replacing runtime configuration. A failed restart, self-test or service-enable step rolls back both files and runtime state. On a clean first install, rollback removes generated TPROXY state and restores ordinary routing.
 

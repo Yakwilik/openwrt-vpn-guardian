@@ -2,7 +2,6 @@ package selftest
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -44,21 +43,19 @@ type Report struct {
 	Checks     []Check `json:"checks"`
 }
 
-func main() {
+func execute() error {
 	rep := Report{StartedAt: time.Now().Unix()}
 
 	cfg, err := config.LoadStack()
 	if err != nil {
 		rep.Checks = append(rep.Checks, Check{Name: "stack config", OK: false, Detail: err.Error()})
-		finish(rep)
-		return
+		return finish(rep)
 	}
 
 	lock, err := acquireLock()
 	if err != nil {
 		rep.Checks = append(rep.Checks, Check{Name: "lock", OK: false, Detail: err.Error()})
-		finish(rep)
-		return
+		return finish(rep)
 	}
 	defer func() { unix.Flock(int(lock.Fd()), unix.LOCK_UN); lock.Close() }()
 
@@ -68,15 +65,14 @@ func main() {
 	tmpDir, err := os.MkdirTemp("/tmp", "vpn-guardian-selftest-")
 	if err != nil {
 		rep.Checks = append(rep.Checks, Check{Name: "tempdir", OK: false, Detail: err.Error()})
-		finish(rep)
-		return
+		return finish(rep)
 	}
 	defer os.RemoveAll(tmpDir)
 
 	if err := runIsolatedPolicyTests(&rep, tmpDir, cfg.AssetsDir); err != nil {
 		rep.Checks = append(rep.Checks, Check{Name: "isolated-tests", OK: false, Detail: err.Error()})
 	}
-	finish(rep)
+	return finish(rep)
 }
 
 func acquireLock() (*os.File, error) {
@@ -91,7 +87,7 @@ func acquireLock() (*os.File, error) {
 	return f, nil
 }
 
-func finish(rep Report) {
+func finish(rep Report) error {
 	rep.FinishedAt = time.Now().Unix()
 	rep.OK = true
 	for _, c := range rep.Checks {
@@ -102,10 +98,13 @@ func finish(rep Report) {
 	}
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
-	_ = enc.Encode(rep)
-	if !rep.OK {
-		os.Exit(1)
+	if err := enc.Encode(rep); err != nil {
+		return fmt.Errorf("write self-test report: %w", err)
 	}
+	if !rep.OK {
+		return errors.New("self-test failed; see the report")
+	}
+	return nil
 }
 func add(rep *Report, name string, ok bool, detail string) {
 	rep.Checks = append(rep.Checks, Check{Name: name, OK: ok, Detail: detail})
@@ -204,7 +203,11 @@ func fetchIPViaSocks(socksAddr, url string, timeout time.Duration) (string, erro
 	if err != nil {
 		return "", err
 	}
-	return strings.TrimSpace(string(b)), nil
+	ip := net.ParseIP(strings.TrimSpace(string(b)))
+	if ip == nil {
+		return "", errors.New("egress endpoint did not return an IP address")
+	}
+	return ip.String(), nil
 }
 
 func fetchViaSocks(socksAddr, url string, timeout time.Duration) ([]byte, error) {
@@ -214,20 +217,7 @@ func fetchViaSocks(socksAddr, url string, timeout time.Duration) ([]byte, error)
 		return nil, err
 	}
 	tr := &http.Transport{
-		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
-			type result struct {
-				c   net.Conn
-				err error
-			}
-			ch := make(chan result, 1)
-			go func() { c, e := d.Dial(network, address); ch <- result{c, e} }()
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case r := <-ch:
-				return r.c, r.err
-			}
-		},
+		DialContext:         d.(proxy.ContextDialer).DialContext,
 		TLSHandshakeTimeout: 2 * time.Second,
 		ForceAttemptHTTP2:   true,
 	}
@@ -238,7 +228,7 @@ func fetchViaSocks(socksAddr, url string, timeout time.Duration) ([]byte, error)
 		return nil, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode >= 500 {
+	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 	return io.ReadAll(io.LimitReader(resp.Body, 64<<10))
@@ -287,7 +277,7 @@ func runIsolatedPolicyTests(rep *Report, tmpDir, assetsDir string) error {
 	if err != nil {
 		return err
 	}
-	defer stopProcess(policyCmd)
+	defer func() { stopProcess(policyCmd) }()
 	frontCmd, err := startXray(frontPath, assetsDir)
 	if err != nil {
 		return err
@@ -484,6 +474,7 @@ func stopProcess(cmd *exec.Cmd) {
 	case <-done:
 	case <-time.After(time.Second):
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		<-done
 	}
 }
 func waitPort(port int, timeout time.Duration) error {
@@ -508,7 +499,9 @@ func errString(err error) string {
 }
 
 // Run executes the isolated production self-test.
-func Run(args []string) {
-	_ = args
-	main()
+func Run(args []string) error {
+	if len(args) != 0 {
+		return errors.New("selftest accepts no arguments")
+	}
+	return execute()
 }

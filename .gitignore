@@ -5,3 +5,6 @@
 *.tar.gz
 .DS_Store
 .idea/
+
+# Local router reports may contain environment-specific addresses.
+.local-reports/

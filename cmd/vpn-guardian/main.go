@@ -14,13 +14,13 @@ import (
 )
 
 func main() {
-	args := os.Args[1:]
-	if len(args) == 0 {
+	args := os.Args
+	if len(args) < 2 {
 		usage()
 		os.Exit(2)
 	}
 
-	if err := run(args); err != nil {
+	if err := run(args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "vpn-guardian:", err)
 		os.Exit(1)
 	}
@@ -41,8 +41,7 @@ func run(args []string) error {
 	case "stack":
 		return stack.Run(commandArgs)
 	case "selftest":
-		selftest.Run(commandArgs)
-		return nil
+		return selftest.Run(commandArgs)
 	case "control":
 		control.Run(commandArgs)
 		return nil

@@ -195,3 +195,16 @@ vpn-guardian intentionally keeps only the external components that would be unre
 - geosite data.
 
 nginx and dnsmasq integrations are optional conveniences.
+
+
+## Front recovery and operational boundaries
+
+The front is a shared classifier for both traffic classes. Backend failure must not interrupt direct traffic. Front failure is different: when VPN-only is enabled, intercepted Internet traffic remains blocked until front recovery, rather than bypassing the classifier. Local/private destinations, including upstream management, are excluded from interception.
+
+The watchdog passively checks the transparent listener through procfs. It never opens a test connection to the transparent port. Generated routing also rejects loopback destinations received through the transparent inbound as defense in depth.
+
+The nftables ruleset is replaced in one transaction. A missing listener falls through to an explicit drop rule; a forward-chain guard prevents marked traffic from escaping through WAN if policy routing is incomplete. The watchdog restores missing VPN-only routing before restarting front. Fail-open remains an explicit operator policy, never an automatic override of VPN-only.
+
+Daemon singleton locks and mutation locks have distinct lifetimes and distinct files. The watchdog holds the mutation lock only during one iteration. Dashboard mutations have a bounded lock wait. The self-test returns errors to its caller so deferred cleanup runs on failure.
+
+Router-level acceptance tests under *tests/router/* use an isolated network namespace attached to the configured LAN bridge. They exercise DNS, HTTP dashboard access, direct/VPN separation, authenticated management, core shutdown through the v2rayA API, and front shutdown with interception retained. Fault injection must be run explicitly from an independent management network.

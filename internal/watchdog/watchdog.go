@@ -17,8 +17,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Yakwilik/openwrt-vpn-guardian/internal/config"
-	"github.com/Yakwilik/openwrt-vpn-guardian/internal/netstate"
+	"github.com/Yakwilik/openwrt-vpn-guardian/internal/lockfile"
 	"github.com/Yakwilik/openwrt-vpn-guardian/internal/paths"
 	"github.com/Yakwilik/openwrt-vpn-guardian/internal/policy"
 	v2rayautil "github.com/Yakwilik/openwrt-vpn-guardian/internal/v2raya"
@@ -36,7 +35,7 @@ const (
 	tag               = "vpn-guardian-watchdog"
 	policyRuntimePath = paths.PolicyRuntime
 	policyModePath    = paths.PolicyMode
-	lockPath          = paths.ControlLock
+	lockPath          = paths.WatchdogLock
 )
 
 type Candidate struct {
@@ -112,30 +111,6 @@ var healthTargets = []healthTarget{
 	{Name: "cloudflare", URL: "https://cp.cloudflare.com/generate_204"},
 	{Name: "apple", URL: "https://captive.apple.com/hotspot-detect.html"},
 	{Name: "firefox", URL: "https://detectportal.firefox.com/canonical.html"},
-}
-
-type frontRecoveryAction uint8
-
-const (
-	frontRecoveryNone frontRecoveryAction = iota
-	frontRecoveryDisableInterception
-	frontRecoveryEnableInterception
-	frontRecoveryRestartFront
-)
-
-func classifyFrontRecovery(enabled, listening, routingReady, routingPresent bool) frontRecoveryAction {
-	switch {
-	case !enabled && routingPresent:
-		return frontRecoveryDisableInterception
-	case !enabled:
-		return frontRecoveryNone
-	case !listening:
-		return frontRecoveryRestartFront
-	case !routingReady:
-		return frontRecoveryEnableInterception
-	default:
-		return frontRecoveryNone
-	}
 }
 
 func main() {
@@ -476,6 +451,12 @@ func rankCandidates(cs []Candidate, s State, activeID, activeSub int) ([]RankedC
 
 func dashboardEventType(msg string) string {
 	switch {
+	case strings.HasPrefix(msg, "front "):
+		return "front"
+	case strings.Contains(msg, "backend listener recovered"):
+		return "recovery"
+	case strings.Contains(msg, "backend runtime repair failed"):
+		return "backend"
 	case strings.Contains(msg, "health confirmation failed"):
 		return "outage"
 	case strings.Contains(msg, "health failed ("),
@@ -569,121 +550,6 @@ func setCandidate(c Candidate) error {
 	return fmt.Errorf("v2rayA did not settle on %s id=%d sub=%d", c.Name, c.TouchID, c.Sub)
 }
 
-func frontEnabled() bool {
-	_, err := os.Stat(paths.FrontEnabled)
-	return err == nil
-}
-
-func frontRoutingState(cfg config.Stack) (ready, present bool) {
-	nftPresent := exec.Command("nft", "list", "table", "inet", "vpn_front").Run() == nil
-
-	rules, _ := exec.Command("ip", "rule", "show").CombinedOutput()
-	ruleText := string(rules)
-	rulePresent := strings.Contains(ruleText, fmt.Sprintf("lookup %d", cfg.Front.RouteTable))
-
-	route, _ := exec.Command("ip", "route", "show", "table", fmt.Sprint(cfg.Front.RouteTable)).CombinedOutput()
-	routePresent := strings.Contains(string(route), "local default dev lo")
-
-	present = nftPresent || rulePresent || routePresent
-	ready = nftPresent && rulePresent && routePresent
-	return ready, present
-}
-
-func disableFrontInterception(cfg config.Stack) {
-	_, _ = exec.Command("/etc/init.d/vpn-front-routing", "stop").CombinedOutput()
-	_ = exec.Command("nft", "delete", "table", "inet", "vpn_front").Run()
-	for i := 0; i < 4; i++ {
-		_ = exec.Command("ip", "rule", "del", "priority", "5").Run()
-	}
-	_ = exec.Command("ip", "route", "flush", "table", fmt.Sprint(cfg.Front.RouteTable)).Run()
-}
-
-func enableFrontInterception() error {
-	out, err := exec.Command("/etc/init.d/vpn-front-routing", "reload").CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("reload vpn-front-routing: %w: %s", err, strings.TrimSpace(string(out)))
-	}
-	return nil
-}
-
-func restartFront() error {
-	out, err := exec.Command("/etc/init.d/vpn-front", "restart").CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("restart vpn-front: %w: %s", err, strings.TrimSpace(string(out)))
-	}
-	return nil
-}
-
-func waitFrontListener(port int, timeout time.Duration) bool {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if netstate.TCPListening(port) {
-			return true
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	return false
-}
-
-func ensureFrontInvariant() error {
-	cfg, err := config.LoadStack()
-	if err != nil {
-		return fmt.Errorf("load stack config for front invariant: %w", err)
-	}
-
-	enabled := frontEnabled()
-	listening := netstate.TCPListening(cfg.Front.TProxyPort)
-	routingReady, routingPresent := frontRoutingState(cfg)
-
-	switch classifyFrontRecovery(enabled, listening, routingReady, routingPresent) {
-	case frontRecoveryNone:
-		return nil
-
-	case frontRecoveryDisableInterception:
-		logLine("front disabled with stale routing state; removing interception")
-		disableFrontInterception(cfg)
-		return nil
-
-	case frontRecoveryEnableInterception:
-		logLine("front listener healthy but routing inactive; restoring interception")
-		if err := enableFrontInterception(); err != nil {
-			return err
-		}
-		return nil
-
-	case frontRecoveryRestartFront:
-		// Do not bypass vpn-front while recovering it. vpn-front owns traffic
-		// classification, so removing interception here could leak proxy-class
-		// traffic directly and violate VPN-only semantics. Keep the current
-		// interception state, restart front, and restore routing only if it was
-		// already incomplete.
-		if routingPresent {
-			logLine("front listener missing; keeping interception active during recovery")
-		} else {
-			logLine("front listener missing; routing is inactive while front recovers")
-		}
-
-		if err := restartFront(); err != nil {
-			return err
-		}
-		if !waitFrontListener(cfg.Front.TProxyPort, 5*time.Second) {
-			return fmt.Errorf("vpn-front did not restore TCP listener on port %d", cfg.Front.TProxyPort)
-		}
-
-		routingReady, _ = frontRoutingState(cfg)
-		if !routingReady {
-			if err := enableFrontInterception(); err != nil {
-				return err
-			}
-		}
-		logLine("front listener recovered")
-		return nil
-
-	default:
-		return nil
-	}
-}
-
 func listenerReady() bool {
 	conn, err := net.DialTimeout("tcp", proxyAddr, 300*time.Millisecond)
 	if err != nil {
@@ -737,20 +603,7 @@ func health(timeout time.Duration) HealthResult {
 		return result
 	}
 	tr := &http.Transport{
-		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
-			type dialResult struct {
-				c   net.Conn
-				err error
-			}
-			ch := make(chan dialResult, 1)
-			go func() { c, e := socks.Dial(network, address); ch <- dialResult{c, e} }()
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case r := <-ch:
-				return r.c, r.err
-			}
-		},
+		DialContext:         socks.(proxy.ContextDialer).DialContext,
 		TLSHandshakeTimeout: 4 * time.Second,
 		ForceAttemptHTTP2:   true,
 	}
@@ -865,11 +718,26 @@ func findCandidate(cs []Candidate, id, sub int) (Candidate, bool) {
 }
 
 func run(logHealthy bool) error {
+	// The daemon instance lock lives for the process, but the control lock
+	// belongs only to an iteration. Never lock dashboard writes forever.
+	controlLock, err := lockfile.Try(paths.ControlLock)
+	if lockfile.Busy(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("lock control for watchdog: %w", err)
+	}
+	defer lockfile.Release(controlLock)
+
 	s := loadState()
+	s.LastCheck = time.Now().Unix()
 	wasUnhealthy := s.Failures > 0 || s.LastError != ""
 	ctrl := loadControl()
 
-	if err := ensureFrontInvariant(); err != nil {
+	if err := ensureFrontInvariant(ctrl); err != nil {
+		s.LastError = "front recovery: " + err.Error()
+		s.LastFailure = time.Now().Unix()
+		saveState(s)
 		logLine("front invariant recovery failed: %v", err)
 		return err
 	}

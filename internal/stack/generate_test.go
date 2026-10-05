@@ -36,6 +36,7 @@ func TestGenerateUsesOwnedRuntimePaths(t *testing.T) {
 	mustContainFile(t, filepath.Join(dir, "vpn-policy.init"), paths.PolicyConfig)
 	mustContainFile(t, filepath.Join(dir, "vpn-front-routing.init"), paths.FrontEnabled)
 	mustContainFile(t, filepath.Join(dir, "vpn-front-routing.init"), paths.FrontNFT)
+	mustContainFile(t, filepath.Join(dir, filepath.Base(paths.FrontConfig)), "\"domainStrategy\": \"UseIPv4\"")
 
 	for _, name := range []string{
 		filepath.Base(paths.FrontConfig),
@@ -71,5 +72,22 @@ func mustContainFile(t *testing.T, path, needle string) {
 	}
 	if !strings.Contains(string(b), needle) {
 		t.Fatalf("%s does not contain %q:\n%s", path, needle, string(b))
+	}
+}
+
+func TestNftReloadIsAtomicAndFailsClosed(t *testing.T) {
+	cfg := defaultStack("br-test", "192.0.2.0/24", "eth-test", "/opt/xray")
+	rules := makeNFT(cfg)
+	for _, fragment := range []string{"add table inet vpn_front\ndelete table inet vpn_front\n", "chain forward_guard", "counter drop"} {
+		if !strings.Contains(rules, fragment) {
+			t.Errorf("missing guard %q", fragment)
+		}
+	}
+	init := makeRoutingInit(cfg)
+	if strings.Contains(strings.Split(init, "stop() {")[0], "nft delete") {
+		t.Fatal("reload must not delete the active table in a separate transaction")
+	}
+	if strings.Contains(strings.Split(init, "stop() {")[0], "route flush") {
+		t.Fatal("reload must not flush active policy routes")
 	}
 }

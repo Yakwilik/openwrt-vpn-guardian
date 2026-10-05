@@ -28,6 +28,7 @@ const (
 	WatchdogState = "/tmp/vpn-guardian-watchdog-state.json"
 	ControlState  = "/tmp/vpn-guardian-control-state.json"
 	ControlLock   = "/tmp/vpn-guardian-control.lock"
+	WatchdogLock  = "/tmp/vpn-guardian-watchdog.lock"
 	RepairAttempt = "/tmp/vpn-guardian-backend-repair-attempt"
 	SelftestLock  = "/tmp/vpn-guardian-selftest.lock"
 

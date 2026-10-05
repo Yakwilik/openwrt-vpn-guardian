@@ -93,3 +93,60 @@ func TestClassifyFrontRecovery(t *testing.T) {
 		})
 	}
 }
+
+func TestFrontFailureMayBypass(t *testing.T) {
+	tests := []struct {
+		name string
+		ctrl Control
+		want bool
+	}{
+		{
+			name: "vpn only",
+			ctrl: Control{Mode: "auto", FailurePolicy: "killswitch"},
+			want: false,
+		},
+		{
+			name: "pinned vpn only",
+			ctrl: Control{Mode: "pinned", FailurePolicy: "killswitch"},
+			want: false,
+		},
+		{
+			name: "fail open",
+			ctrl: Control{Mode: "auto", FailurePolicy: "failopen"},
+			want: true,
+		},
+		{
+			name: "explicit direct",
+			ctrl: Control{Mode: "direct", FailurePolicy: "killswitch"},
+			want: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := frontFailureMayBypass(tt.ctrl); got != tt.want {
+				t.Fatalf("frontFailureMayBypass(%+v) = %v, want %v", tt.ctrl, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDaemonLockIsNotControlLock(t *testing.T) {
+	if lockPath == "/tmp/vpn-guardian-control.lock" {
+		t.Fatal("daemon must not own the management lock for its entire lifetime")
+	}
+}
+
+func TestRecoveryEventsAreVisible(t *testing.T) {
+	for msg, want := range map[string]string{
+		"front listener missing in VPN-only mode; keeping interception active while recovering front": "front",
+		"front listener recovered; routing ready":                                                     "front",
+		"front invariant recovery failed: timeout":                                                    "front",
+		"backend listener recovered after runtime repair":                                             "recovery",
+		"backend runtime repair failed: timeout":                                                      "backend",
+	} {
+		if got := dashboardEventType(msg); got != want {
+			t.Errorf("event type for %q = %q, want %q", msg, got, want)
+		}
+	}
+}
