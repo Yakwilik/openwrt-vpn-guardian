@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/Yakwilik/openwrt-vpn-guardian/internal/config"
@@ -384,8 +385,30 @@ func setupDashboardRuntime() error {
 	if out, err := run("nginx", "-t", "-c", "/etc/nginx/nginx.conf"); err != nil {
 		return fmt.Errorf("nginx config invalid: %v: %s", err, out)
 	}
-	if out, err := run("/etc/init.d/nginx", "reload"); err != nil {
-		return fmt.Errorf("reload nginx: %v: %s", err, out)
+	if err := reloadNginx(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func reloadNginx() error {
+	for _, pidPath := range []string{"/var/run/nginx.pid", "/run/nginx.pid"} {
+		data, err := os.ReadFile(pidPath)
+		if err != nil {
+			continue
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+		if err != nil || pid <= 1 {
+			continue
+		}
+		if err := syscall.Kill(pid, syscall.SIGHUP); err == nil {
+			return nil
+		}
+	}
+
+	out, err := run("/etc/init.d/nginx", "restart")
+	if err != nil {
+		return fmt.Errorf("reload nginx: HUP unavailable and restart failed: %v: %s", err, out)
 	}
 	return nil
 }
