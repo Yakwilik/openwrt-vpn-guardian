@@ -70,19 +70,27 @@ Health states:
 - *degraded* — 2 probes succeed;
 - *down* — 0 or 1 probe succeeds.
 
-A down state must remain confirmed before failover.
+Endpoint health failures must remain confirmed before failover. A missing backend listener or a selected node outside the configured allowlist is treated as unavailable immediately.
 
 Backend listener loss is handled before endpoint health probing. If a node is selected but the v2rayA SOCKS listener is absent, the watchdog first gives the manager a short grace window, then repairs backend-only state if needed and restarts v2rayA when the listener is still missing. The restart decision does not depend on the v2raya_core PID: a surviving core process with no SOCKS listener is treated as stuck. Automatic repair is rate-limited to avoid restart loops. While the listener is unavailable, watchdog state is written as down with 0/4 probes so the dashboard never displays stale healthy results.
 
-Candidate eligibility is shared by watchdog, collector and control code. Current transports:
+The required *selection.allowedTransports* field in *stack.json* determines which nodes may be selected. The setup wizard uses the transport catalogue from *internal/config*:
 
-- VLESS TCP + Reality;
-- VLESS XHTTP + Reality;
-- VLESS WebSocket + TLS;
-- Hysteria2;
-- Shadowsocks.
+| Configuration value | Allowed transport |
+|---|---|
+| hysteria2 | Hysteria2 |
+| vless-xhttp-reality | VLESS XHTTP + Reality |
+| shadowsocks | Shadowsocks |
+| vless-ws-tls | VLESS WebSocket + TLS |
+| vless-tcp-reality | VLESS TCP + Reality |
 
-Selection combines transport priority, EWMA latency, recent failures and exponential cooldown.
+An absent, empty, unknown or duplicate allowlist is a configuration error. Runtime loading never widens it to all transports. New setup offers the supported catalogue and requires an explicit selection.
+
+Watchdog, collector, control and setup use the same candidate policy and database reader in *internal/v2raya*. The reader keeps subscription ordering and node positions in one SQLite read transaction. Forbidden transports and invalid subscription references cannot become candidates or inflate the eligible count.
+
+A selected node outside the allowlist cannot be declared healthy merely because its SOCKS endpoint responds. Automatic mode selects an allowed node; pinned mode keeps automatic switching disabled and applies the configured failure policy. VPN-only remains fail-closed for the proxy class.
+
+Selection combines the existing transport priority with EWMA latency, recent failures and exponential cooldown.
 
 ## Collector
 
@@ -127,24 +135,25 @@ When nginx is already installed, vpn.home.arpa is added as an optional reverse p
 
 Control mutations require a management session and CSRF token. Initial management unlock is accepted only from the LAN CIDR declared in the stack manifest. X-Real-IP is trusted only when the immediate HTTP peer is loopback, which allows a local reverse proxy without allowing direct clients to spoof their source.
 
-## Bootstrap
+## Initialization and bootstrap
 
-The first-run bootstrap is intentionally ordered so an unconfigured VPN cannot break ordinary Internet access:
+Installing the OpenWrt package does not activate interception. Run *vpn-guardian init* in an interactive root terminal to configure the router. Both *init* and *bootstrap* use the same Go coordinator in *internal/setup*:
 
-~~~text
-discover interfaces
-  -> create manifests
-  -> render and validate
-  -> start/prepare v2rayA backend-only
-  -> start dashboard/API
-  -> wait for usable VPN SOCKS backend
-  -> backup
-  -> apply front/policy/routing
-  -> self-test
-  -> enable boot services
-~~~
+1. Check installed dependencies, command access and package service files.
+2. Load existing manifests or discover a new network draft. The wizard collects missing network settings, confirms the transport allowlist and requests subscription URLs when needed. Existing routing rules are retained.
+3. Validate the complete draft, the selected network devices, generated Xray configurations and nftables syntax in a temporary directory.
+4. Prepare v2rayA in backend-only mode. If the manager has no account, collect and confirm its first username and password without echoing the password. Set and verify the backend SOCKS port through the manager API, then check database/API access, import confirmed subscriptions and check the allowed node inventory again.
+5. Select an allowed VPN node and verify backend connectivity before activating Guardian routing.
+6. Persist both manifests with atomic file replacements and rollback on failure, start the standalone dashboard API and apply the generated runtime with backup and self-test.
+7. Enable runtime services at boot and record successful initialization. Configure optional dashboard integrations.
 
-If the VPN backend is not usable, bootstrap stops before front activation and retries later.
+Interactive *init* reopens transport selection even when a complete configuration already exists. *bootstrap* reuses complete settings and prompts only when input is missing. The boot service invokes *bootstrap --non-interactive*: missing data or unavailable dependencies produce an error without reading stdin or entering a retry loop. Correct the reported problem and rerun *vpn-guardian init*.
+
+On a first install, failure before activation leaves Guardian interception uninstalled. The ordinary OpenWrt forwarding path remains available while the operator completes setup. A missing member of an existing manifest pair must be restored explicitly rather than replaced with default routing.
+
+*vpn-guardian bootstrap --dry-run* checks an existing complete configuration and dependency/API access without importing subscriptions, selecting nodes, writing manifests or starting services. It does not replace the backend connectivity gate used during activation.
+
+A dedicated setup lock prevents concurrent initializations. Runtime mutations also acquire the shared control lock; the wizard never holds that lock while waiting for input.
 
 ## Self-test
 
@@ -164,17 +173,7 @@ The destructive policy checks use isolated temporary Xray instances instead of c
 
 ## Backup and rollback
 
-Apply follows:
-
-~~~text
-backup
-  -> render
-  -> validate
-  -> atomic install
-  -> restart
-  -> self-test
-  -> enable at boot
-~~~
+Apply renders and validates the proposed runtime first. It then creates a backup, installs files atomically, restarts services, runs the self-test and enables services at boot.
 
 On failure:
 

@@ -6,6 +6,9 @@ STOP=15
 PROG=/usr/bin/vpn-guardian
 
 start_service() {
+  [ -s /etc/vpn-guardian/stack.json ] || return 0
+  [ -s /etc/vpn-guardian/routing.json ] || return 0
+
   procd_open_instance vpn-guardian-api
   procd_set_param command "$PROG" api-server -listen 0.0.0.0:20175
   procd_set_param stdout 1

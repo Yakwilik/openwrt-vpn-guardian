@@ -95,3 +95,9 @@ func TestRoutingValidation(t *testing.T) {
 		t.Fatal("expected unsupported routing version to fail")
 	}
 }
+
+func TestExampleManifestsValidate(t *testing.T) {
+	if _, _, err := LoadFiles("../../configs/stack.example.json", "../../configs/routing.example.json"); err != nil {
+		t.Fatalf("packaged example manifests must validate: %v", err)
+	}
+}

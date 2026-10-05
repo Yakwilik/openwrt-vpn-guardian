@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Yakwilik/openwrt-vpn-guardian/internal/config"
 	"github.com/Yakwilik/openwrt-vpn-guardian/internal/lockfile"
 	"github.com/Yakwilik/openwrt-vpn-guardian/internal/paths"
 	"github.com/Yakwilik/openwrt-vpn-guardian/internal/policy"
@@ -38,17 +39,7 @@ const (
 	lockPath          = paths.WatchdogLock
 )
 
-type Candidate struct {
-	TouchID        int    `json:"id"`
-	Sub            int    `json:"sub"`
-	SubscriptionID int    `json:"subscriptionId"`
-	Priority       int    `json:"priority"`
-	Sort           int    `json:"sort"`
-	Name           string `json:"name"`
-	Protocol       string `json:"protocol"`
-	Network        string `json:"network"`
-	Security       string `json:"security"`
-}
+type Candidate = v2rayautil.Candidate
 
 type Control struct {
 	Mode          string `json:"mode"`
@@ -200,111 +191,24 @@ func getRaw(db *sql.DB, key string) (string, error) {
 	return v2rayautil.GetRaw(db, key)
 }
 
-func str(m map[string]any, keys ...string) string {
-	for _, k := range keys {
-		if v, ok := m[k]; ok && v != nil {
-			return fmt.Sprint(v)
-		}
-	}
-	return ""
-}
 func candidates(db *sql.DB) ([]Candidate, error) {
-	sr, err := db.Query("SELECT id FROM subscriptions ORDER BY sort,id")
+	cfg, err := config.LoadStack()
+	if err != nil {
+		return nil, fmt.Errorf("load candidate selection: %w", err)
+	}
+	selection, err := v2rayautil.NewCandidatePolicy(cfg.Selection)
 	if err != nil {
 		return nil, err
 	}
-	subOrd := map[int]int{}
-	n := 0
-	for sr.Next() {
-		var id int
-		if err := sr.Scan(&id); err != nil {
-			sr.Close()
-			return nil, err
-		}
-		subOrd[id] = n
-		n++
-	}
-	sr.Close()
-
-	rows, err := db.Query("SELECT sub_id,sort,config_json FROM servers WHERE type='subscription_server' ORDER BY sub_id,sort,id")
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var out []Candidate
-	for rows.Next() {
-		var subID sql.NullInt64
-		var s int
-		var raw string
-		if err := rows.Scan(&subID, &s, &raw); err != nil {
-			return nil, err
-		}
-		var root map[string]any
-		if json.Unmarshal([]byte(raw), &root) != nil {
-			continue
-		}
-		obj := root
-		if x, ok := root["serverObj"].(map[string]any); ok {
-			obj = x
-		}
-
-		protoName := strings.ToLower(str(obj, "protocol"))
-		network := strings.ToLower(str(obj, "net", "network"))
-		security := strings.ToLower(str(obj, "tls", "security"))
-		name := str(obj, "ps", "name", "remarks")
-		priority, eligible := v2rayautil.CandidatePriority(protoName, network, security, s)
-		if !eligible {
-			continue
-		}
-
-		sub := 0
-		actualSubID := 0
-		if subID.Valid {
-			actualSubID = int(subID.Int64)
-			sub = subOrd[actualSubID]
-		}
-		out = append(out, Candidate{
-			TouchID: s + 1, Sub: sub, SubscriptionID: actualSubID,
-			Priority: priority, Sort: s, Name: name,
-			Protocol: protoName, Network: network, Security: security,
-		})
-	}
-	sort.SliceStable(out, func(i, j int) bool {
-		if out[i].Priority != out[j].Priority {
-			return out[i].Priority < out[j].Priority
-		}
-		return out[i].Sort < out[j].Sort
-	})
-	return out, rows.Err()
+	return v2rayautil.ListCandidates(context.Background(), db, selection)
 }
+
 func current(db *sql.DB) (id, sub int, ok bool) {
-	raw, err := getRaw(db, "outbound.proxy:connectedServers")
+	touch, found, err := v2rayautil.ConnectedTouch(context.Background(), db)
 	if err != nil {
-		return
+		return 0, 0, false
 	}
-	var x map[string]any
-	if json.Unmarshal([]byte(raw), &x) != nil {
-		return
-	}
-	arr, yes := x["touches"].([]any)
-	if !yes || len(arr) == 0 {
-		return
-	}
-	m, yes := arr[0].(map[string]any)
-	if !yes {
-		return
-	}
-	idf, yes := m["id"].(float64)
-	if !yes {
-		return
-	}
-	id = int(idf)
-	if v, yes := m["sub"].(float64); yes {
-		sub = int(v)
-	}
-	ok = true
-	return
+	return touch.ID, touch.Sub, found
 }
 
 func loadControl() Control {
@@ -717,6 +621,14 @@ func findCandidate(cs []Candidate, id, sub int) (Candidate, bool) {
 	return Candidate{}, false
 }
 
+// A reachable but forbidden backend must never restore proxy-class routing.
+func healthForActiveCandidate(eligible bool, probe func() HealthResult) HealthResult {
+	if !eligible {
+		return backendUnavailableHealth("active node is not allowed by selection.allowedTransports")
+	}
+	return probe()
+}
+
 func run(logHealthy bool) error {
 	// The daemon instance lock lives for the process, but the control lock
 	// belongs only to an iteration. Never lock dashboard writes forever.
@@ -773,7 +685,7 @@ func run(logHealthy bool) error {
 	active, activeKnown := findCandidate(cs, activeID, activeSub)
 
 	previousHealthStatus := s.LastHealth.Status
-	h := healthNow()
+	h := healthForActiveCandidate(activeKnown, healthNow)
 	s.LastHealth = h
 	if h.Healthy {
 		if err := syncPolicyRuntime(ctrl, true); err != nil {
@@ -800,15 +712,18 @@ func run(logHealthy bool) error {
 	s.Failures++
 	s.LastFailure = time.Now().Unix()
 	s.LastError = "health failed"
+	if !activeKnown {
+		s.LastError = "active node is not allowed by selection.allowedTransports"
+	}
 	if err := syncPolicyRuntime(ctrl, false); err != nil {
 		logLine("policy sync on health failure failed: %v", err)
 	}
 	saveState(s)
 	logLine("health failed (%d/2): %s", s.Failures, healthSummary(h))
 
-	if s.Failures < 2 {
+	if s.Failures < 2 && activeKnown {
 		time.Sleep(8 * time.Second)
-		h = healthNow()
+		h = healthForActiveCandidate(activeKnown, healthNow)
 		s.LastHealth = h
 		if h.Healthy {
 			if err := syncPolicyRuntime(ctrl, true); err != nil {
@@ -838,6 +753,9 @@ func run(logHealthy bool) error {
 	if ctrl.Mode == "pinned" {
 		s.Failures = 0
 		s.LastError = "pinned node unhealthy; auto-switch suppressed"
+		if !activeKnown {
+			s.LastError = "pinned node is not allowed by selection.allowedTransports; auto-switch suppressed"
+		}
 		saveState(s)
 		logLine("pinned mode: backend unhealthy, automatic node switch suppressed")
 		return nil

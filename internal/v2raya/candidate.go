@@ -1,49 +1,67 @@
 package v2raya
 
-import "strings"
+import (
+	"strings"
 
-// CandidatePriority returns the effective auto-selection priority for a node.
-// Lower values are preferred. Keeping transport eligibility in one package
-// prevents watchdog, dashboard collector and control API from disagreeing
-// about how many nodes are actually selectable.
-func CandidatePriority(protocol, network, security string, sort int) (int, bool) {
-	protocol = strings.ToLower(strings.TrimSpace(protocol))
-	network = strings.ToLower(strings.TrimSpace(network))
-	security = strings.ToLower(strings.TrimSpace(security))
+	"github.com/Yakwilik/openwrt-vpn-guardian/internal/config"
+)
 
-	base, ok := CandidatePriorityBase(protocol, network, security)
-	if !ok {
+// CandidatePolicy applies the configured transport allowlist consistently to
+// automatic selection, manual controls and the dashboard's eligible node count.
+// Its zero value rejects all candidates.
+type CandidatePolicy struct {
+	allowed map[config.Transport]struct{}
+}
+
+func NewCandidatePolicy(selection config.Selection) (CandidatePolicy, error) {
+	if err := selection.Validate(); err != nil {
+		return CandidatePolicy{}, err
+	}
+
+	policy := CandidatePolicy{
+		allowed: make(map[config.Transport]struct{}, len(selection.AllowedTransports)),
+	}
+	for _, transport := range selection.AllowedTransports {
+		policy.allowed[transport] = struct{}{}
+	}
+	return policy, nil
+}
+
+// Priority returns the effective selection priority. Lower values are preferred;
+// the configured allowlist controls eligibility without changing established ranks.
+func (p CandidatePolicy) Priority(protocol, network, security string, sort int) (int, bool) {
+	transport, base, supported := candidateTransport(protocol, network, security)
+	if !supported {
+		return 0, false
+	}
+	if _, allowed := p.allowed[transport]; !allowed {
 		return 0, false
 	}
 	return base + sort, true
 }
 
-// CandidatePriorityBase returns the transport-class base priority.
-func CandidatePriorityBase(protocol, network, security string) (int, bool) {
-	switch {
-	case protocol == "hysteria2":
-		return 20, true
-	case protocol == "vless" && network == "xhttp" && security == "reality":
-		return 40, true
-	case protocol == "shadowsocks":
-		return 60, true
-	case protocol == "vless" && network == "ws" && security == "tls":
-		return 80, true
-	case protocol == "vless" && network == "tcp" && security == "reality":
-		return 100, true
-	default:
-		return 0, false
-	}
+func (p CandidatePolicy) Eligible(protocol, network, security string) bool {
+	_, eligible := p.Priority(protocol, network, security, 0)
+	return eligible
 }
 
-// CandidateEligible reports whether the node participates in automatic
-// selection, without exposing scoring details to callers that only need a
-// count.
-func CandidateEligible(protocol, network, security string) bool {
-	_, ok := CandidatePriorityBase(
-		strings.ToLower(strings.TrimSpace(protocol)),
-		strings.ToLower(strings.TrimSpace(network)),
-		strings.ToLower(strings.TrimSpace(security)),
-	)
-	return ok
+func candidateTransport(protocol, network, security string) (config.Transport, int, bool) {
+	protocol = strings.ToLower(strings.TrimSpace(protocol))
+	network = strings.ToLower(strings.TrimSpace(network))
+	security = strings.ToLower(strings.TrimSpace(security))
+
+	switch {
+	case protocol == "hysteria2":
+		return config.TransportHysteria2, 20, true
+	case protocol == "vless" && network == "xhttp" && security == "reality":
+		return config.TransportVLESSXHTTPReality, 40, true
+	case protocol == "shadowsocks":
+		return config.TransportShadowsocks, 60, true
+	case protocol == "vless" && network == "ws" && security == "tls":
+		return config.TransportVLESSWSTLS, 80, true
+	case protocol == "vless" && network == "tcp" && security == "reality":
+		return config.TransportVLESSTCPReality, 100, true
+	default:
+		return "", 0, false
+	}
 }

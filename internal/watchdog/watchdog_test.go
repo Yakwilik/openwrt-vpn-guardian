@@ -150,3 +150,29 @@ func TestRecoveryEventsAreVisible(t *testing.T) {
 		}
 	}
 }
+
+func TestForbiddenActiveCandidateSkipsHealthProbe(t *testing.T) {
+	called := false
+	got := healthForActiveCandidate(false, func() HealthResult {
+		called = true
+		return HealthResult{Healthy: true, Status: "healthy", Passed: 4, Total: 4}
+	})
+	if called {
+		t.Fatal("forbidden active candidate must not be probed or declared healthy")
+	}
+	if got.Healthy || got.Status != "down" || got.Passed != 0 {
+		t.Fatalf("forbidden active candidate health = %+v", got)
+	}
+}
+
+func TestAllowedActiveCandidatePreservesHealth(t *testing.T) {
+	called := false
+	want := HealthResult{Healthy: true, Status: "degraded", Passed: 3, Total: 4}
+	got := healthForActiveCandidate(true, func() HealthResult {
+		called = true
+		return want
+	})
+	if !called || got.Healthy != want.Healthy || got.Status != want.Status || got.Passed != want.Passed {
+		t.Fatalf("allowed active candidate health = %+v, want %+v", got, want)
+	}
+}

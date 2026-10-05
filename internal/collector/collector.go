@@ -203,7 +203,11 @@ func collectSnapshot(rt *runtimeState) (Status, error) {
 	}
 	defer db.Close()
 
-	node, protocol, endpoint, candidates, total, transparent, pacMode, err := dbStatus(db)
+	selection, err := v2rayautil.NewCandidatePolicy(stack.Selection)
+	if err != nil {
+		return out, err
+	}
+	node, protocol, endpoint, candidates, total, transparent, pacMode, err := dbStatus(db, selection)
 	if err != nil {
 		return out, err
 	}
@@ -247,7 +251,7 @@ func collectSnapshot(rt *runtimeState) (Status, error) {
 	out.Overall = overallStatus(ctrl, state.LastHealth, out.TProxyActive)
 	return out, nil
 }
-func dbStatus(db *sql.DB) (node, protocol, endpoint string, candidates, total int, transparent, pacMode string, err error) {
+func dbStatus(db *sql.DB, selection v2rayautil.CandidatePolicy) (node, protocol, endpoint string, candidates, total int, transparent, pacMode string, err error) {
 	var connectedRaw string
 	if err = db.QueryRow("SELECT value FROM system_config WHERE key='outbound.proxy:connectedServers'").Scan(&connectedRaw); err != nil {
 		return
@@ -285,17 +289,15 @@ func dbStatus(db *sql.DB) (node, protocol, endpoint string, candidates, total in
 			}
 		}
 	}
-	_ = db.QueryRow("SELECT count(*) FROM servers WHERE type='subscription_server'").Scan(&total)
-	rows, qerr = db.Query("SELECT config_json FROM servers WHERE type='subscription_server'")
-	if qerr == nil {
-		for rows.Next() {
-			var raw string
-			if rows.Scan(&raw) == nil && supportedNode(raw) {
-				candidates++
-			}
-		}
-		rows.Close()
+	if err = db.QueryRow("SELECT count(*) FROM servers WHERE type='subscription_server'").Scan(&total); err != nil {
+		return
 	}
+	eligible, candidateErr := v2rayautil.ListCandidates(context.Background(), db, selection)
+	if candidateErr != nil {
+		err = candidateErr
+		return
+	}
+	candidates = len(eligible)
 
 	var settingRaw string
 	if db.QueryRow("SELECT value FROM system_config WHERE key='system:setting'").Scan(&settingRaw) == nil {
@@ -334,21 +336,6 @@ func parseNode(raw string) (name, protocol, endpoint string) {
 		}
 	}
 	return
-}
-func supportedNode(raw string) bool {
-	var root map[string]any
-	if json.Unmarshal([]byte(raw), &root) != nil {
-		return false
-	}
-	obj := root
-	if v, ok := root["serverObj"].(map[string]any); ok {
-		obj = v
-	}
-	return v2rayautil.CandidateEligible(
-		field(obj, "protocol"),
-		field(obj, "net", "network"),
-		field(obj, "tls", "security"),
-	)
 }
 
 func field(m map[string]any, keys ...string) string {

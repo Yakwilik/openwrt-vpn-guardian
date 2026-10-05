@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/Yakwilik/openwrt-vpn-guardian/internal/paths"
@@ -22,6 +23,7 @@ type Stack struct {
 	Backend      Backend   `json:"backend"`
 	Dashboard    Dashboard `json:"dashboard"`
 	Policy       Policy    `json:"policy"`
+	Selection    Selection `json:"selection"`
 	Bypass4      []string  `json:"bypass4"`
 }
 
@@ -82,6 +84,7 @@ func DefaultStack(lanInterface, lanCIDR, wanInterface, assetsDir string) Stack {
 			ProbeURL:      "https://connectivitycheck.gstatic.com/generate_204",
 			ProbeInterval: "5s",
 		},
+		Selection: Selection{AllowedTransports: SupportedTransports()},
 		Bypass4: []string{
 			"0.0.0.0/8",
 			"10.0.0.0/8",
@@ -151,14 +154,20 @@ func (s Stack) Validate() error {
 	if s.Version != Version {
 		return fmt.Errorf("unsupported stack manifest version %d", s.Version)
 	}
-	if s.LANInterface == "" || s.LANCIDR == "" {
-		return errors.New("LAN config missing")
+	if err := ValidateInterfaceName(s.LANInterface); err != nil {
+		return fmt.Errorf("lanInterface: %w", err)
 	}
-	if s.WANInterface == "" {
-		return errors.New("WAN interface missing")
+	if err := ValidateLANCIDR(s.LANCIDR); err != nil {
+		return fmt.Errorf("lanCidr: %w", err)
 	}
-	if s.AssetsDir == "" {
-		return errors.New("Xray assets directory missing")
+	if err := ValidateInterfaceName(s.WANInterface); err != nil {
+		return fmt.Errorf("wanInterface: %w", err)
+	}
+	if !filepath.IsAbs(s.AssetsDir) {
+		return errors.New("assetsDir must be an absolute path to Xray assets")
+	}
+	if err := s.Selection.Validate(); err != nil {
+		return err
 	}
 
 	if err := validatePort("front.socksPort", s.Front.SocksPort); err != nil {

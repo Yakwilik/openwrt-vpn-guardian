@@ -1,0 +1,20 @@
+This package redistributes unmodified upstream v2rayA 2.5.8 binaries.
+
+Upstream release:
+https://github.com/v2rayA/v2rayA/releases/tag/v2.5.8
+
+Corresponding source (manager, core, web UI and build scripts):
+https://github.com/v2rayA/v2rayA/tree/f86763d00b14c565671fcad75f990fdf40facbf4
+https://codeload.github.com/v2rayA/v2rayA/tar.gz/refs/tags/v2.5.8
+Source archive SHA-256:
+dfc0c113134728ef8c73ff8a7fea398103af1b9e38749437fed668d72985e601
+
+The same source archive is included alongside the VPN Guardian build artifacts.
+Manager license: GNU Affero General Public License version 3, in LICENSE.
+Core license and notice: Mozilla Public License 2.0, in CORE-LICENSE.
+All upstream copyright and license notices are retained in the source archive.
+
+OpenWrt service integration is adapted from:
+https://github.com/openwrt/packages/tree/f1470815f41fe199bfdafe9a91ad115bc2e91203/net/v2raya
+The UCI service remains disabled by default. The default core and web paths
+point to the matching files installed by this package.

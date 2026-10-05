@@ -92,3 +92,28 @@ func TestClassifyRepair(t *testing.T) {
 		})
 	}
 }
+
+func TestBackendOnlyPreparationDoesNotRequireCore(t *testing.T) {
+	tests := []struct {
+		name  string
+		state RuntimeState
+		ready bool
+	}{
+		{"fresh manager without nodes", RuntimeState{Manager: true, Transparent: "close"}, true},
+		{"selected node with stopped core", RuntimeState{Manager: true, Transparent: "close", Selected: true}, true},
+		{"healthy backend", RuntimeState{Manager: true, Transparent: "close", Running: true, Selected: true, Core: true, SOCKS: true}, true},
+		{"manager missing", RuntimeState{Transparent: "close", Running: true}, false},
+		{"transparent interception enabled", RuntimeState{Manager: true, Transparent: "global", Running: true}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := backendOnlyReady(tt.state); got != tt.ready {
+				t.Fatalf("backendOnlyReady(%+v) = %v, want %v", tt.state, got, tt.ready)
+			}
+		})
+	}
+	stopped := RuntimeState{Manager: true, Transparent: "close", Selected: true}
+	if classifyRepair(stopped) == repairNone {
+		t.Fatal("a prepared manager with a stopped selected core still needs backend repair")
+	}
+}

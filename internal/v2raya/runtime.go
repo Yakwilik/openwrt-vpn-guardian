@@ -1,6 +1,7 @@
 package v2raya
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -15,14 +16,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Yakwilik/openwrt-vpn-guardian/internal/paths"
+
 	_ "modernc.org/sqlite"
 )
 
 const (
-	databasePath       = "/etc/v2raya/v2raya.db"
 	backendSOCKSAddr   = "127.0.0.1:20173"
 	backendProxyURL    = "socks5://127.0.0.1:20173"
-	repairAttemptPath  = "/tmp/vpn-guardian-backend-repair-attempt"
 	repairMinInterval  = time.Minute
 	managerReadyWindow = 15 * time.Second
 )
@@ -34,6 +35,12 @@ type RuntimeState struct {
 	Manager     bool   `json:"manager"`
 	Core        bool   `json:"core"`
 	SOCKS       bool   `json:"socks"`
+}
+
+// Backend preparation only requires a configured manager. The core is started
+// explicitly after setup has selected a usable allowed node, or by repair.
+func backendOnlyReady(state RuntimeState) bool {
+	return state.Manager && state.Transparent == "close"
 }
 
 type repairAction uint8
@@ -55,7 +62,12 @@ func classifyRepair(state RuntimeState) repairAction {
 }
 
 func BackendSOCKSReady() bool {
-	conn, err := net.DialTimeout("tcp", backendSOCKSAddr, 500*time.Millisecond)
+	return backendSOCKSReadyContext(context.Background())
+}
+
+func backendSOCKSReadyContext(ctx context.Context) bool {
+	dialer := net.Dialer{Timeout: 500 * time.Millisecond}
+	conn, err := dialer.DialContext(ctx, "tcp", backendSOCKSAddr)
 	if err != nil {
 		return false
 	}
@@ -64,7 +76,13 @@ func BackendSOCKSReady() bool {
 }
 
 func BackendUsable() bool {
-	if !BackendSOCKSReady() {
+	return BackendUsableContext(context.Background())
+}
+
+// BackendUsableContext checks HTTPS egress through the ordinary backend SOCKS
+// listener. It never connects to the transparent front listener.
+func BackendUsableContext(ctx context.Context) bool {
+	if !backendSOCKSReadyContext(ctx) {
 		return false
 	}
 	p, err := url.Parse(backendProxyURL)
@@ -79,7 +97,11 @@ func BackendUsable() bool {
 
 	client := &http.Client{Transport: tr, Timeout: 5 * time.Second}
 	for _, endpoint := range []string{"https://api.ipify.org", "https://icanhazip.com"} {
-		resp, err := client.Get(endpoint)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+		if err != nil {
+			return false
+		}
+		resp, err := client.Do(req)
 		if err != nil {
 			continue
 		}
@@ -147,7 +169,7 @@ func EnsureBackendOnly() error {
 	if err != nil {
 		return err
 	}
-	if state.Transparent == "close" && state.Running {
+	if backendOnlyReady(state) {
 		cleanupTransparentHostRules()
 		return nil
 	}
@@ -165,9 +187,7 @@ func EnsureBackendOnly() error {
 	if err != nil {
 		return err
 	}
-	if err = setBackendOnly(db); err == nil {
-		err = putRuntimeRaw(db, "system:running", "true")
-	}
+	err = setBackendOnly(db)
 	_ = db.Close()
 	if err != nil {
 		return err
@@ -300,7 +320,7 @@ func cleanupTransparentHostRules() {
 }
 
 func openRuntimeDB() (*sql.DB, error) {
-	return sql.Open("sqlite", "file:"+databasePath+"?_pragma=busy_timeout(5000)")
+	return sql.Open("sqlite", "file:"+paths.V2rayADB+"?_pragma=busy_timeout(5000)")
 }
 
 func getRuntimeRaw(db *sql.DB, key string) (string, error) {
@@ -315,7 +335,7 @@ func putRuntimeRaw(db *sql.DB, key, value string) error {
 }
 
 func service(action string) error {
-	out, err := exec.Command("/etc/init.d/v2raya", action).CombinedOutput()
+	out, err := exec.Command(paths.V2rayAServiceInit, action).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("v2raya %s: %w: %s", action, err, strings.TrimSpace(string(out)))
 	}
@@ -358,17 +378,17 @@ func waitManagerState(timeout time.Duration) error {
 	for time.Now().Before(deadline) {
 		if processAlive("v2raya") {
 			state, err := InspectRuntime()
-			if err == nil && state.Transparent == "close" && state.Running {
+			if err == nil && backendOnlyReady(state) {
 				return nil
 			}
 		}
 		time.Sleep(250 * time.Millisecond)
 	}
-	return errors.New("v2rayA did not enter backend-only running state")
+	return errors.New("v2rayA manager did not enter backend-only mode")
 }
 
 func repairThrottled() bool {
-	b, err := os.ReadFile(repairAttemptPath)
+	b, err := os.ReadFile(paths.RepairAttempt)
 	if err != nil {
 		return false
 	}
@@ -380,5 +400,5 @@ func repairThrottled() bool {
 }
 
 func recordRepairAttempt() {
-	_ = os.WriteFile(repairAttemptPath, []byte(strconv.FormatInt(time.Now().Unix(), 10)+"\n"), 0600)
+	_ = os.WriteFile(paths.RepairAttempt, []byte(strconv.FormatInt(time.Now().Unix(), 10)+"\n"), 0600)
 }

@@ -3,6 +3,7 @@ package stack
 import (
 	"archive/tar"
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,7 +21,6 @@ import (
 	"github.com/Yakwilik/openwrt-vpn-guardian/internal/config"
 	"github.com/Yakwilik/openwrt-vpn-guardian/internal/paths"
 	"github.com/Yakwilik/openwrt-vpn-guardian/internal/policy"
-	v2rayautil "github.com/Yakwilik/openwrt-vpn-guardian/internal/v2raya"
 )
 
 const (
@@ -45,7 +45,7 @@ type Status struct {
 	Backups                                     int `json:"backups"`
 }
 
-const usageText = "vpn-guardian stack {bootstrap [--dry-run]|init [--dry-run] [--force]|status|validate|apply|backup|restore <archive>|selftest|cleanup}"
+const usageText = "vpn-guardian stack {bootstrap [--non-interactive] [--dry-run]|init [--non-interactive] [--dry-run]|status|validate|apply|backup|restore <archive>|selftest|cleanup}"
 
 func Run(args []string) error {
 	if len(args) == 0 {
@@ -56,19 +56,8 @@ func Run(args []string) error {
 	commandArgs := args[1:]
 
 	switch command {
-	case "bootstrap":
-		dryRun, err := parseBootstrapArgs(commandArgs)
-		if err != nil {
-			return err
-		}
-		return bootstrapCmd(dryRun)
-
-	case "init":
-		force, dryRun, err := parseInitArgs(commandArgs)
-		if err != nil {
-			return err
-		}
-		return initCmd(force, dryRun)
+	case "bootstrap", "init":
+		return setupCmd(command, commandArgs)
 
 	case "status":
 		if err := requireNoArgs(command, commandArgs); err != nil {
@@ -122,38 +111,6 @@ func Run(args []string) error {
 	}
 }
 
-func parseBootstrapArgs(args []string) (bool, error) {
-	switch len(args) {
-	case 0:
-		return false, nil
-	case 1:
-		if args[0] == "--dry-run" {
-			return true, nil
-		}
-	}
-	return false, fmt.Errorf("invalid bootstrap arguments %q; usage: vpn-guardian stack bootstrap [--dry-run]", args)
-}
-
-func parseInitArgs(args []string) (force, dryRun bool, err error) {
-	for _, arg := range args {
-		switch arg {
-		case "--force":
-			if force {
-				return false, false, errors.New("init option --force specified more than once")
-			}
-			force = true
-		case "--dry-run":
-			if dryRun {
-				return false, false, errors.New("init option --dry-run specified more than once")
-			}
-			dryRun = true
-		default:
-			return false, false, fmt.Errorf("unknown init option %q", arg)
-		}
-	}
-	return force, dryRun, nil
-}
-
 func requireNoArgs(command string, args []string) error {
 	if len(args) == 0 {
 		return nil
@@ -161,137 +118,35 @@ func requireNoArgs(command string, args []string) error {
 	return fmt.Errorf("%s does not accept arguments: %q", command, args)
 }
 
-func bootstrapCmd(dryRun bool) error {
-	if os.Geteuid() != 0 {
-		return errors.New("bootstrap must run as root")
-	}
-	if err := checkBootstrapDependencies(); err != nil {
-		return err
-	}
-	_, stackErr := os.Stat(stackPath)
-	_, routingErr := os.Stat(routingPath)
-	stackExists := stackErr == nil
-	routingExists := routingErr == nil
-
-	if dryRun {
-		lan := detectLANInterface()
-		wan := detectWANInterface()
-		lanCIDR := ""
-		lanIP := ""
-		if lan != "" {
-			lanCIDR = detectLANCIDR(lan)
-			lanIP = detectLANAddress(lan)
-		}
-		if stackExists && routingExists {
-			if err := validateCmd(); err != nil {
-				return fmt.Errorf("validate manifests: %w", err)
-			}
-		}
-		socksReady := v2rayautil.BackendSOCKSReady()
-		backendUsable := v2rayautil.BackendUsable()
-		plan := map[string]any{
-			"dryRun":             true,
-			"stackManifest":      stackExists,
-			"routingManifest":    routingExists,
-			"lanInterface":       lan,
-			"lanCIDR":            lanCIDR,
-			"lanAddress":         lanIP,
-			"wanInterface":       wan,
-			"dashboardDNS":       "vpn.home.arpa",
-			"backendSOCKSReady":  socksReady,
-			"backendUsable":      backendUsable,
-			"wouldActivateFront": backendUsable && stackExists && routingExists,
-		}
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		return enc.Encode(plan)
-	}
-
-	if err := os.MkdirAll(stackDir, 0700); err != nil {
-		return err
-	}
-
-	switch {
-	case !stackExists && !routingExists:
-		if err := initCmd(false, false); err != nil {
-			return fmt.Errorf("initialize manifests: %w", err)
-		}
-	case stackExists != routingExists:
-		return errors.New("only one manifest exists; restore the missing manifest or run init --force explicitly")
-	}
-
-	if err := validateCmd(); err != nil {
-		return fmt.Errorf("validate manifests: %w", err)
-	}
-	if err := ensureV2rayAService(); err != nil {
-		return err
-	}
-	if err := v2rayautil.EnsureBackendOnly(); err != nil {
-		return fmt.Errorf("configure v2rayA backend-only mode: %w", err)
-	}
-	if _, err := v2rayautil.RepairBackendListener(false); err != nil {
-		return fmt.Errorf("repair v2rayA backend listener: %w", err)
-	}
-	if err := setupDashboardDNS(); err != nil {
-		return fmt.Errorf("configure dashboard DNS: %w", err)
-	}
-	if err := setupDashboardRuntime(); err != nil {
-		return fmt.Errorf("configure dashboard runtime: %w", err)
-	}
-
-	if !v2rayautil.BackendUsable() {
-		_ = os.Remove(bootstrapMarker)
-		fmt.Println("bootstrap pending: v2rayA backend is not usable through SOCKS 127.0.0.1:20173")
-		fmt.Println("front remains inactive; the bootstrap service will retry automatically")
-		return nil
-	}
-
-	if err := applyCmd(); err != nil {
-		return fmt.Errorf("activate generated stack: %w", err)
-	}
-	if err := setupDashboardRuntime(); err != nil {
-		return fmt.Errorf("reload dashboard after activation: %w", err)
-	}
-	if err := os.WriteFile(bootstrapMarker, []byte(time.Now().Format(time.RFC3339)+"\n"), 0600); err != nil {
-		return fmt.Errorf("write bootstrap marker: %w", err)
-	}
-	fmt.Println("bootstrap OK")
-	return nil
-}
-
-func checkBootstrapDependencies() error {
-	required := []string{"xray", "v2raya", "nft", "ip", "uci", "ubus"}
-	var missing []string
-	for _, name := range required {
-		if _, err := exec.LookPath(name); err != nil {
-			missing = append(missing, name)
-		}
-	}
-	if len(missing) > 0 {
-		return fmt.Errorf("missing runtime dependencies: %s", strings.Join(missing, ", "))
-	}
-	return nil
-}
-
 func ensureV2rayAService() error {
+	previousCore, _ := run("uci", "-q", "get", "v2raya.config.v2ray_bin")
+	coreChanged := strings.TrimSpace(previousCore) != paths.V2rayACoreBinary
+	if out, err := run("uci", "-q", "set", "v2raya.config.v2ray_bin="+paths.V2rayACoreBinary); err != nil {
+		return fmt.Errorf("configure the matching v2rayA core: %v: %s", err, out)
+	}
 	if out, err := run("uci", "-q", "set", "v2raya.config.enabled=1"); err != nil {
 		return fmt.Errorf("enable v2rayA in UCI: %v: %s", err, out)
 	}
 	if out, err := run("uci", "-q", "commit", "v2raya"); err != nil {
 		return fmt.Errorf("commit v2rayA UCI: %v: %s", err, out)
 	}
-	if out, err := run("/etc/init.d/v2raya", "enable"); err != nil {
+	if out, err := run(paths.V2rayAServiceInit, "enable"); err != nil {
 		return fmt.Errorf("enable v2rayA service: %v: %s", err, out)
 	}
-	if !serviceRunning("v2raya") {
-		if out, err := run("/etc/init.d/v2raya", "start"); err != nil {
+	managerRunning := serviceRunning("v2raya")
+	if managerRunning && coreChanged {
+		if out, err := run(paths.V2rayAServiceInit, "restart"); err != nil {
+			return fmt.Errorf("reload the v2rayA core path: %v: %s", err, out)
+		}
+	} else if !managerRunning {
+		if out, err := run(paths.V2rayAServiceInit, "start"); err != nil {
 			return fmt.Errorf("start v2rayA service: %v: %s", err, out)
 		}
 	}
 
 	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
-		if _, err := os.Stat("/etc/v2raya/v2raya.db"); err == nil {
+		if _, err := os.Stat(paths.V2rayADB); err == nil {
 			return nil
 		}
 		time.Sleep(250 * time.Millisecond)
@@ -376,6 +231,10 @@ func setupDashboardRuntime() error {
 		return fmt.Errorf("vpn-guardian-api did not listen on %s", defaultDashboardAPIAddr)
 	}
 
+	return nil
+}
+
+func setupDashboardProxy() error {
 	if _, err := exec.LookPath("nginx"); err != nil {
 		return nil
 	}
@@ -410,59 +269,6 @@ func reloadNginx() error {
 	if err != nil {
 		return fmt.Errorf("reload nginx: HUP unavailable and restart failed: %v: %s", err, out)
 	}
-	return nil
-}
-
-func initCmd(force, dryRun bool) error {
-	if !force && !dryRun {
-		if _, err := os.Stat(stackPath); err == nil {
-			return fmt.Errorf("%s already exists; use init --force to replace manifests", stackPath)
-		}
-		if _, err := os.Stat(routingPath); err == nil {
-			return fmt.Errorf("%s already exists; use init --force to replace manifests", routingPath)
-		}
-	}
-
-	lan := detectLANInterface()
-	if lan == "" {
-		return errors.New("unable to detect LAN interface")
-	}
-	lanCIDR := detectLANCIDR(lan)
-	if lanCIDR == "" {
-		return fmt.Errorf("unable to detect IPv4 CIDR for LAN interface %s", lan)
-	}
-	wan := detectWANInterface()
-	if wan == "" {
-		return errors.New("unable to detect WAN interface")
-	}
-
-	assetsDir := detectAssetsDir()
-	s := defaultStack(lan, lanCIDR, wan, assetsDir)
-	r := defaultRouting()
-
-	if dryRun {
-		out := struct {
-			Stack   Stack   `json:"stack"`
-			Routing Routing `json:"routing"`
-		}{Stack: s, Routing: r}
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		return enc.Encode(out)
-	}
-
-	if err := os.MkdirAll(stackDir, 0700); err != nil {
-		return err
-	}
-	if err := jsonWrite(stackPath, s); err != nil {
-		return err
-	}
-	if err := jsonWrite(routingPath, r); err != nil {
-		return err
-	}
-
-	fmt.Printf("initialized %s and %s\n", stackPath, routingPath)
-	fmt.Printf("detected lan=%s cidr=%s wan=%s assets=%s\n", lan, lanCIDR, wan, assetsDir)
-	fmt.Println("next: vpn-guardian validate && vpn-guardian apply")
 	return nil
 }
 
@@ -795,7 +601,7 @@ func makeCollectorInit(s Stack) string {
 	}
 	return strings.Join(lines, "\n")
 }
-func validateGenerated(dir string) error {
+func validateGenerated(ctx context.Context, dir, assetsDir string) error {
 	xrayConfigs := []string{
 		filepath.Base(paths.FrontConfig),
 		filepath.Base(paths.PolicyFailOpen),
@@ -805,13 +611,20 @@ func validateGenerated(dir string) error {
 	}
 	for _, name := range xrayConfigs {
 		config := filepath.Join(dir, name)
-		if out, err := run("/usr/bin/xray", "run", "-test", "-config", config); err != nil {
+		testCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		cmd := exec.CommandContext(testCtx, "/usr/bin/xray", "run", "-test", "-config", config)
+		cmd.Env = append(os.Environ(), "XRAY_LOCATION_ASSET="+assetsDir)
+		out, err := cmd.CombinedOutput()
+		cancel()
+		if err != nil {
 			return fmt.Errorf("%s invalid: %v: %s", name, err, out)
 		}
 	}
 
 	nftConfig := filepath.Join(dir, filepath.Base(paths.FrontNFT))
-	if out, err := run("nft", "-c", "-f", nftConfig); err != nil {
+	checkCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if out, err := exec.CommandContext(checkCtx, "nft", "-c", "-f", nftConfig).CombinedOutput(); err != nil {
 		return fmt.Errorf("%s invalid: %v: %s", filepath.Base(paths.FrontNFT), err, out)
 	}
 	return nil
@@ -830,7 +643,7 @@ func validateCmd() error {
 	if err := generate(dir, s, r); err != nil {
 		return err
 	}
-	if err := validateGenerated(dir); err != nil {
+	if err := validateGenerated(context.Background(), dir, s.AssetsDir); err != nil {
 		return err
 	}
 	fmt.Printf("OK manifest=v%d domains=%d ips=%d\n", s.Version, len(r.ProxyDomains), len(r.ProxyIPs))
@@ -851,7 +664,7 @@ func applyCmd() error {
 	if err := generate(dir, s, r); err != nil {
 		return err
 	}
-	if err := validateGenerated(dir); err != nil {
+	if err := validateGenerated(context.Background(), dir, s.AssetsDir); err != nil {
 		return err
 	}
 

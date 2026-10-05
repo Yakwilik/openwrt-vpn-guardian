@@ -122,19 +122,33 @@ func (e *APIError) Error() string {
 // Call performs one authenticated v2rayA request and returns the complete
 // response envelope.
 func (c *Client) Call(ctx context.Context, method, path string, payload any) (map[string]any, error) {
+	return c.call(ctx, method, path, payload, true)
+}
+
+// call shares the bounded response/JSON pipeline with initial account setup.
+// Unauthenticated requests deliberately do not consult the local JWT secret:
+// v2rayA creates that secret when the first account is registered.
+func (c *Client) call(ctx context.Context, method, path string, payload any, authenticate bool) (map[string]any, error) {
 	if c == nil {
 		return nil, fmt.Errorf("nil v2rayA client")
 	}
 	if c.httpClient == nil {
 		return nil, fmt.Errorf("nil v2rayA HTTP client")
 	}
-	if c.tokenSource == nil {
-		return nil, fmt.Errorf("nil v2rayA token source")
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
-	token, err := c.tokenSource()
-	if err != nil {
-		return nil, fmt.Errorf("create v2rayA API token: %w", err)
+	var token string
+	if authenticate {
+		if c.tokenSource == nil {
+			return nil, fmt.Errorf("nil v2rayA token source")
+		}
+		var err error
+		token, err = c.tokenSource()
+		if err != nil {
+			return nil, fmt.Errorf("create v2rayA API token: %w", err)
+		}
 	}
 
 	var body io.Reader
@@ -151,7 +165,9 @@ func (c *Client) Call(ctx context.Context, method, path string, payload any) (ma
 	if err != nil {
 		return nil, fmt.Errorf("create v2rayA API request: %w", err)
 	}
-	req.Header.Set("Authorization", token)
+	if authenticate {
+		req.Header.Set("Authorization", token)
+	}
 	if payload != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}

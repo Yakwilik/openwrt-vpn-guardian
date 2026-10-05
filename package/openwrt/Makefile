@@ -6,7 +6,8 @@ PKG_RELEASE:=1
 
 PKG_SOURCE_PROTO:=git
 PKG_SOURCE_URL:=https://github.com/Yakwilik/openwrt-vpn-guardian.git
-PKG_SOURCE_VERSION:=main
+# CI and SDK builds must supply the immutable commit being packaged.
+PKG_SOURCE_VERSION:=
 PKG_MIRROR_HASH:=skip
 
 PKG_MAINTAINER:=Yakwilik
@@ -19,6 +20,8 @@ PKG_BUILD_FLAGS:=no-mips16
 
 GO_PKG:=github.com/Yakwilik/openwrt-vpn-guardian
 GO_PKG_BUILD_PKG:=$(GO_PKG)/cmd/vpn-guardian
+GO_PKG_INSTALL_EXTRA:=internal/api/web/.*
+PKG_ASLR_PIE:=0
 
 include $(INCLUDE_DIR)/package.mk
 include $(TOPDIR)/feeds/packages/lang/golang/golang-package.mk
@@ -37,12 +40,22 @@ define Package/vpn-guardian
   CATEGORY:=Network
   SUBMENU:=VPN
   TITLE:=Selective VPN control plane for v2rayA
-  DEPENDS:=$(ARCH_DEPENDS) +v2raya +xray-core +v2ray-geosite +ca-bundle +ip-full +kmod-nft-tproxy +nftables-json
+  DEPENDS:=$(ARCH_DEPENDS) +xray-core +v2ray-geosite +ca-bundle +ip-full +kmod-nft-tproxy +nftables-json
+  EXTRA_DEPENDS:=v2raya (>=2.5.8)
 endef
 
 define Package/vpn-guardian/description
  Selective VPN routing, health monitoring and automatic v2rayA failover.
  Direct traffic remains independent from VPN backend health.
+endef
+
+define Package/vpn-guardian/conffiles
+/etc/vpn-guardian/
+endef
+
+define Build/Prepare
+	@printf '%s\n' "$(PKG_SOURCE_VERSION)" | grep -Eq '^[0-9a-f]{40}$$' || { echo 'PKG_SOURCE_VERSION must be a full commit hash' >&2; exit 1; }
+	$(call Build/Prepare/Default)
 endef
 
 define Package/vpn-guardian/install
@@ -69,9 +82,8 @@ define Package/vpn-guardian/postinst
 #!/bin/sh
 [ -n "$$IPKG_INSTROOT" ] && exit 0
 
-rm -f /etc/vpn-guardian/bootstrap-complete
-/etc/init.d/vpn-guardian-bootstrap enable >/dev/null 2>&1 || true
-/etc/init.d/vpn-guardian-bootstrap restart >/dev/null 2>&1 || true
+echo 'VPN Guardian installed. Run: vpn-guardian init'
+echo 'Setup verifies dependencies and configuration before enabling routing.'
 
 exit 0
 endef
@@ -79,6 +91,7 @@ endef
 define Package/vpn-guardian/prerm
 #!/bin/sh
 [ -n "$$IPKG_INSTROOT" ] && exit 0
+[ "$$PKG_UPGRADE" = "1" ] && exit 0
 
 /usr/bin/vpn-guardian cleanup >/dev/null 2>&1 || true
 
@@ -94,10 +107,11 @@ endef
 define Package/vpn-guardian/postrm
 #!/bin/sh
 [ -n "$$IPKG_INSTROOT" ] && exit 0
+[ "$$PKG_UPGRADE" = "1" ] && exit 0
 
-rm -f /etc/init.d/vpn-front-routing
-rm -f /etc/init.d/vpn-backend-watchdog
-rm -f /etc/init.d/vpn-dashboard-collector
+for svc in vpn-front-routing vpn-backend-watchdog vpn-dashboard-collector vpn-front vpn-policy; do
+	rm -f "/etc/init.d/$$svc"
+done
 
 if [ -x /etc/init.d/dnsmasq ]; then
 	uci -q delete dhcp.vpn_guardian

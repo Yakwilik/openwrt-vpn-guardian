@@ -4,9 +4,12 @@ import (
 	_ "embed"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"net/http"
 	"os"
 	"time"
+
+	"github.com/Yakwilik/openwrt-vpn-guardian/internal/config"
 )
 
 const defaultAPIListen = "0.0.0.0:20175"
@@ -21,6 +24,10 @@ func Serve(args []string) error {
 	listen := fs.String("listen", defaultAPIListen, "HTTP listen address")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+
+	if _, _, err := config.Load(); err != nil {
+		return fmt.Errorf("configuration incomplete; run vpn-guardian init: %w", err)
 	}
 
 	mux := http.NewServeMux()

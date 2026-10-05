@@ -14,11 +14,11 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/Yakwilik/openwrt-vpn-guardian/internal/config"
 	"github.com/Yakwilik/openwrt-vpn-guardian/internal/lockfile"
 	"github.com/Yakwilik/openwrt-vpn-guardian/internal/paths"
 	"github.com/Yakwilik/openwrt-vpn-guardian/internal/policy"
@@ -30,10 +30,7 @@ const statePath = paths.ControlState
 const controlPath = paths.ControlConfig
 const proxyURL = "socks5://127.0.0.1:20173"
 
-type Candidate struct {
-	TouchID, Sub, SubscriptionID, Priority, Sort int
-	Name, Protocol, Network, Security, Address   string
-}
+type Candidate = v2rayautil.Candidate
 type State struct {
 	Failures           int
 	FallbackDirect     bool
@@ -164,97 +161,23 @@ func str(m map[string]any, keys ...string) string {
 }
 
 func candidates(db *sql.DB) ([]Candidate, error) {
-	sr, err := db.Query("SELECT id FROM subscriptions ORDER BY sort,id")
+	cfg, err := config.LoadStack()
+	if err != nil {
+		return nil, fmt.Errorf("load candidate selection: %w", err)
+	}
+	selection, err := v2rayautil.NewCandidatePolicy(cfg.Selection)
 	if err != nil {
 		return nil, err
 	}
-	subOrd := map[int]int{}
-	n := 0
-	for sr.Next() {
-		var id int
-		if err := sr.Scan(&id); err != nil {
-			sr.Close()
-			return nil, err
-		}
-		subOrd[id] = n
-		n++
-	}
-	sr.Close()
-	rows, err := db.Query("SELECT sub_id,sort,config_json FROM servers WHERE type='subscription_server' ORDER BY sub_id,sort,id")
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []Candidate
-	for rows.Next() {
-		var subID sql.NullInt64
-		var s int
-		var raw string
-		if err := rows.Scan(&subID, &s, &raw); err != nil {
-			return nil, err
-		}
-		var root map[string]any
-		if json.Unmarshal([]byte(raw), &root) != nil {
-			continue
-		}
-		obj := root
-		if x, ok := root["serverObj"].(map[string]any); ok {
-			obj = x
-		}
-		proto := strings.ToLower(str(obj, "protocol"))
-		network := strings.ToLower(str(obj, "net", "network"))
-		security := strings.ToLower(str(obj, "tls", "security"))
-		name := str(obj, "ps", "name", "remarks")
-		host := str(obj, "add", "address", "host")
-		port := str(obj, "port")
-		address := host
-		if host != "" && port != "" {
-			address = host + ":" + port
-		}
-		pri, eligible := v2rayautil.CandidatePriority(proto, network, security, s)
-		if !eligible {
-			continue
-		}
-		sub := 0
-		actualSubID := 0
-		if subID.Valid {
-			actualSubID = int(subID.Int64)
-			sub = subOrd[actualSubID]
-		}
-		out = append(out, Candidate{TouchID: s + 1, Sub: sub, SubscriptionID: actualSubID, Priority: pri, Sort: s, Name: name, Protocol: proto, Network: network, Security: security, Address: address})
-	}
-	sort.SliceStable(out, func(i, j int) bool {
-		if out[i].Priority != out[j].Priority {
-			return out[i].Priority < out[j].Priority
-		}
-		return out[i].Sort < out[j].Sort
-	})
-	return out, rows.Err()
+	return v2rayautil.ListCandidates(context.Background(), db, selection)
 }
 
 func current(db *sql.DB) (id, sub int, ok bool) {
-	raw, err := getRaw(db, "outbound.proxy:connectedServers")
+	touch, found, err := v2rayautil.ConnectedTouch(context.Background(), db)
 	if err != nil {
-		return
+		return 0, 0, false
 	}
-	var x map[string]any
-	if json.Unmarshal([]byte(raw), &x) != nil {
-		return
-	}
-	arr, yes := x["touches"].([]any)
-	if !yes || len(arr) == 0 {
-		return
-	}
-	m, yes := arr[0].(map[string]any)
-	if !yes {
-		return
-	}
-	id = int(m["id"].(float64))
-	if v, yes := m["sub"].(float64); yes {
-		sub = int(v)
-	}
-	ok = true
-	return
+	return touch.ID, touch.Sub, found
 }
 
 func setConnected(db *sql.DB, c Candidate) error {

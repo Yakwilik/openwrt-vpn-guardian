@@ -38,4 +38,12 @@ const (
 	WatchdogServiceInit  = "/etc/init.d/vpn-backend-watchdog"
 	CollectorServiceInit = "/etc/init.d/vpn-dashboard-collector"
 	APIServiceInit       = "/etc/init.d/vpn-guardian-api"
+	BootstrapServiceInit = "/etc/init.d/vpn-guardian-bootstrap"
+	FrontRoutingHotplug  = "/etc/hotplug.d/iface/99-vpn-front-routing"
+	V2rayAServiceInit    = "/etc/init.d/v2raya"
+	V2rayADB             = "/etc/v2raya/v2raya.db"
+	V2rayAAssetsDir      = "/usr/share/v2raya"
+	V2rayACoreBinary     = "/usr/bin/v2raya_core"
+	CACertificateBundle  = "/etc/ssl/certs/ca-certificates.crt"
+	SetupLock            = "/tmp/vpn-guardian-setup.lock"
 )

@@ -1,8 +1,8 @@
 {
   "version": 1,
   "lanInterface": "br-lan",
-  "lanCidr": "192.168.8.0/24",
-  "wanInterface": "eth1",
+  "lanCidr": "192.168.1.0/24",
+  "wanInterface": "eth0",
   "assetsDir": "/usr/share/xray",
   "front": {
     "socksPort": 20174,
@@ -33,5 +33,14 @@
     "172.16.0.0/12",
     "192.168.0.0/16",
     "224.0.0.0/3"
-  ]
+  ],
+  "selection": {
+    "allowedTransports": [
+      "hysteria2",
+      "vless-xhttp-reality",
+      "shadowsocks",
+      "vless-ws-tls",
+      "vless-tcp-reality"
+    ]
+  }
 }

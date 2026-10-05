@@ -1,0 +1,131 @@
+name: OpenWrt package
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["main"]
+    tags: ["v*"]
+    paths:
+      - "cmd/**"
+      - "internal/**"
+      - "configs/**"
+      - "package/**"
+      - "scripts/package-openwrt.sh"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/package.yml"
+  pull_request:
+    paths:
+      - "cmd/**"
+      - "internal/**"
+      - "configs/**"
+      - "package/**"
+      - "scripts/package-openwrt.sh"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/package.yml"
+
+permissions:
+  contents: read
+
+env:
+  OPENWRT_VERSION: "24.10.4"
+  OPENWRT_SOURCE_COMMIT: "78b23a26c4c98938d549e7ff5876508544e33d4d"
+  PACKAGES_FEED_COMMIT: "f1470815f41fe199bfdafe9a91ad115bc2e91203"
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go test ./...
+      - run: go vet ./...
+      - run: go test -race ./...
+
+  ipk:
+    needs: test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: mediatek/filogic
+            arch: aarch64_cortex-a53
+            sdk: openwrt-sdk-24.10.4-mediatek-filogic_gcc-13.3.0_musl.Linux-x86_64.tar.zst
+            sha256: b9762b8e1c8e114b0e6a252b98e94e6e4a1d2496beb9f6044c26227a8d78dee0
+          - target: ipq40xx/generic
+            arch: arm_cortex-a7_neon-vfpv4
+            sdk: openwrt-sdk-24.10.4-ipq40xx-generic_gcc-13.3.0_musl_eabi.Linux-x86_64.tar.zst
+            sha256: b25462353851ae48d4578d7457dc3702a47296b92f58e506069e9a6180ab6370
+          - target: x86/64
+            arch: x86_64
+            sdk: openwrt-sdk-24.10.4-x86-64_gcc-13.3.0_musl.Linux-x86_64.tar.zst
+            sha256: 229e871f734a2cee5ce3ad6a3e98d3836b0899bfdeaea4d9c2c5cc7b1fce1407
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install SDK host tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang flex bison gawk gettext git libncurses-dev libssl-dev python3 python3-setuptools rsync unzip zlib1g-dev zstd file binutils swig
+
+      - name: Download and verify the official SDK
+        env:
+          SDK_TARGET: ${{ matrix.target }}
+          SDK_FILE: ${{ matrix.sdk }}
+          SDK_SHA256: ${{ matrix.sha256 }}
+        run: |
+          curl --fail --location --retry 3 --output "$RUNNER_TEMP/sdk.tar.zst" \
+            "https://downloads.openwrt.org/releases/$OPENWRT_VERSION/targets/$SDK_TARGET/$SDK_FILE"
+          echo "$SDK_SHA256  $RUNNER_TEMP/sdk.tar.zst" | sha256sum --check --strict
+          mkdir -p "$RUNNER_TEMP/openwrt-sdk"
+          tar --zstd --extract --file "$RUNNER_TEMP/sdk.tar.zst" \
+            --directory "$RUNNER_TEMP/openwrt-sdk" --strip-components=1
+          {
+            printf 'src-git-full base https://github.com/openwrt/openwrt.git^%s\n' "$OPENWRT_SOURCE_COMMIT"
+            printf 'src-git packages https://github.com/openwrt/packages.git^%s\n' "$PACKAGES_FEED_COMMIT"
+          } > "$RUNNER_TEMP/openwrt-sdk/feeds.conf"
+
+      - name: Build and verify both packages
+        env:
+          PACKAGE_ARCH: ${{ matrix.arch }}
+          SDK_TARGET: ${{ matrix.target }}
+          SDK_SHA256: ${{ matrix.sha256 }}
+        run: scripts/package-openwrt.sh "$RUNNER_TEMP/openwrt-sdk" "$GITHUB_WORKSPACE/dist" "$PACKAGE_ARCH"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vpn-guardian-openwrt-24.10-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test, ipk]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: vpn-guardian-openwrt-24.10-*
+          path: dist
+          merge-multiple: true
+      - name: Publish verified packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          cd dist
+          sha256sum --check --strict -- *.sha256
+          release_options=()
+          if [[ "$RELEASE_TAG" == *-* ]]; then
+            release_options+=(--prerelease)
+          fi
+          gh release create "$RELEASE_TAG" --verify-tag --generate-notes "${release_options[@]}" -- ./*
