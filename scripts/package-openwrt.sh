@@ -125,8 +125,10 @@ for package in v2raya vpn-guardian; do
     sh -n "$script"
   done < <(find "$unpack_dir/data/etc/init.d" "$unpack_dir/control" -type f \
     \( -path '*/init.d/*' -o -name 'postinst*' -o -name 'prerm*' -o -name 'postrm*' \) -print0)
-  cp "$package_file" "$output_dir/"
   package_name="$(basename "$package_file")"
+  # GitHub normalizes release asset names; metadata must use the same name.
+  package_name="$(printf '%s' "$package_name" | LC_ALL=C tr -c 'A-Za-z0-9._-' '.')"
+  cp "$package_file" "$output_dir/$package_name"
   if [ "$package" = v2raya ]; then
     backend_package_name="$package_name"
   fi
