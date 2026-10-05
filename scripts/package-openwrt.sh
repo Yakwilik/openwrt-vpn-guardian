@@ -33,6 +33,10 @@ if [[ "${GITHUB_REF:-}" == refs/tags/v* ]]; then
     echo 'Release tags must contain a valid package version after v.' >&2
     exit 1
   fi
+  # opkg sorts prereleases before the final version only with a tilde.
+  if [[ "${package_version%%+*}" == *-* ]]; then
+    package_version="${package_version%%-*}~${package_version#*-}"
+  fi
 fi
 
 source_mirror="$(mktemp -d)"

@@ -6,8 +6,8 @@
 
 Для **OpenWrt 24.10 с opkg**. Доступны сборки для ARM64, ARMv7 и x86-64; [точные архитектуры и требования](docs/installation.md).
 
-1. Откройте последнюю успешную [сборку пакетов](https://github.com/Yakwilik/openwrt-vpn-guardian/actions/workflows/package.yml) и скачайте архив для архитектуры роутера из раздела **Artifacts**.
-2. Распакуйте архив и скопируйте оба файла *.ipk* в */tmp* на роутере. Комплект содержит Guardian и совместимую v2rayA.
+1. Откройте [Releases](https://github.com/Yakwilik/openwrt-vpn-guardian/releases) и скачайте два файла *.ipk* для архитектуры роутера: **vpn-guardian** и **v2raya**.
+2. Скопируйте оба файла в */tmp* на роутере.
 3. Подключитесь к роутеру по SSH и выполните:
 
 ~~~sh

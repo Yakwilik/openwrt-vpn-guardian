@@ -111,6 +111,7 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           pattern: vpn-guardian-openwrt-24.10-*
@@ -125,7 +126,13 @@ jobs:
           cd dist
           sha256sum --check --strict -- *.sha256
           release_options=()
-          if [[ "$RELEASE_TAG" == *-* ]]; then
+          if [[ "${RELEASE_TAG%%+*}" == *-* ]]; then
             release_options+=(--prerelease)
           fi
-          gh release create "$RELEASE_TAG" --verify-tag --generate-notes "${release_options[@]}" -- ./*
+          notes_file="$GITHUB_WORKSPACE/docs/releases/$RELEASE_TAG.md"
+          if [[ -f "$notes_file" ]]; then
+            release_options+=(--notes-file "$notes_file")
+          else
+            release_options+=(--generate-notes)
+          fi
+          gh release create "$RELEASE_TAG" --verify-tag --title "OpenWrt VPN Guardian $RELEASE_TAG" "${release_options[@]}" -- ./*
