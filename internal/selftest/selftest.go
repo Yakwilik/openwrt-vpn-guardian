@@ -16,16 +16,17 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Yakwilik/openwrt-vpn-guardian/internal/config"
+	"github.com/Yakwilik/openwrt-vpn-guardian/internal/paths"
+
 	"golang.org/x/net/proxy"
 	"golang.org/x/sys/unix"
 )
 
 const (
-	prodFrontSocks      = "127.0.0.1:20174"
 	testPolicyPort      = 20178
 	testFrontPort       = 20179
 	testDeadBackendPort = 29999
-	lockPath            = "/tmp/vpn-selftest.lock"
 )
 
 var homeIP string
@@ -45,6 +46,14 @@ type Report struct {
 
 func main() {
 	rep := Report{StartedAt: time.Now().Unix()}
+
+	cfg, err := config.LoadStack()
+	if err != nil {
+		rep.Checks = append(rep.Checks, Check{Name: "stack config", OK: false, Detail: err.Error()})
+		finish(rep)
+		return
+	}
+
 	lock, err := acquireLock()
 	if err != nil {
 		rep.Checks = append(rep.Checks, Check{Name: "lock", OK: false, Detail: err.Error()})
@@ -53,10 +62,10 @@ func main() {
 	}
 	defer func() { unix.Flock(int(lock.Fd()), unix.LOCK_UN); lock.Close() }()
 
-	runStaticChecks(&rep)
-	runHealthyProduction(&rep)
+	runStaticChecks(&rep, cfg)
+	runHealthyProduction(&rep, cfg)
 
-	tmpDir, err := os.MkdirTemp("/tmp", "vpn-selftest-")
+	tmpDir, err := os.MkdirTemp("/tmp", "vpn-guardian-selftest-")
 	if err != nil {
 		rep.Checks = append(rep.Checks, Check{Name: "tempdir", OK: false, Detail: err.Error()})
 		finish(rep)
@@ -64,14 +73,14 @@ func main() {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	if err := runIsolatedPolicyTests(&rep, tmpDir); err != nil {
+	if err := runIsolatedPolicyTests(&rep, tmpDir, cfg.AssetsDir); err != nil {
 		rep.Checks = append(rep.Checks, Check{Name: "isolated-tests", OK: false, Detail: err.Error()})
 	}
 	finish(rep)
 }
 
 func acquireLock() (*os.File, error) {
-	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
+	f, err := os.OpenFile(paths.SelftestLock, os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
 		return nil, err
 	}
@@ -107,7 +116,7 @@ func cmdOK(name string, args ...string) (bool, string) {
 	return err == nil, strings.TrimSpace(string(b))
 }
 
-func runStaticChecks(rep *Report) {
+func runStaticChecks(rep *Report, cfg config.Stack) {
 	if ok, out := cmdOK("nft", "list", "table", "inet", "vpn_front"); ok {
 		add(rep, "nft vpn_front", true, "present")
 	} else {
@@ -116,46 +125,34 @@ func runStaticChecks(rep *Report) {
 
 	rules, _ := exec.Command("ip", "rule", "show").CombinedOutput()
 	ruleText := string(rules)
-	add(rep, "policy rule table 101",
-		strings.Contains(ruleText, "fwmark 0xc0/0xc0") && strings.Contains(ruleText, "lookup 101"),
+	expectedMark := fmt.Sprintf("fwmark 0x%x/0x%x", cfg.Front.Mark, cfg.Front.Mark)
+	expectedTable := fmt.Sprintf("lookup %d", cfg.Front.RouteTable)
+	add(rep, "front policy rule",
+		strings.Contains(ruleText, expectedMark) && strings.Contains(ruleText, expectedTable),
 		strings.TrimSpace(ruleText))
 	add(rep, "no global LAN blackhole IPv4",
-		!strings.Contains(ruleText, "iif br-lan blackhole"),
+		!strings.Contains(ruleText, "iif "+cfg.LANInterface+" blackhole"),
 		strings.TrimSpace(ruleText))
 
 	rules6, _ := exec.Command("ip", "-6", "rule", "show").CombinedOutput()
 	rule6Text := string(rules6)
 	add(rep, "no global LAN blackhole IPv6",
-		!strings.Contains(rule6Text, "iif br-lan blackhole"),
+		!strings.Contains(rule6Text, "iif "+cfg.LANInterface+" blackhole"),
 		strings.TrimSpace(rule6Text))
 
-	u4, _ := exec.Command("uci", "-q", "get", "network.vpn_block_lan_leak.disabled").CombinedOutput()
-	u6, _ := exec.Command("uci", "-q", "get", "network.vpn_block_lan_leak_6.disabled").CombinedOutput()
-	add(rep, "GL.iNet LAN leak guard disabled",
-		strings.TrimSpace(string(u4)) == "1" && strings.TrimSpace(string(u6)) == "1",
-		fmt.Sprintf("ipv4=%q ipv6=%q", strings.TrimSpace(string(u4)), strings.TrimSpace(string(u6))))
-
-	route, _ := exec.Command("ip", "route", "show", "table", "101").CombinedOutput()
+	route, _ := exec.Command("ip", "route", "show", "table", fmt.Sprint(cfg.Front.RouteTable)).CombinedOutput()
 	routeText := string(route)
-	add(rep, "route table 101",
+	add(rep, "front route table",
 		strings.Contains(routeText, "local default dev lo"),
 		strings.TrimSpace(routeText))
 
-	for _, svc := range []string{"vpn-front", "vpn-policy", "v2raya", "vpn-backend-watchdog", "vpn-dashboard-collector"} {
+	for _, svc := range []string{"vpn-front", "vpn-policy", "v2raya", "vpn-backend-watchdog", "vpn-dashboard-collector", "vpn-guardian-api"} {
 		ok, out := cmdOK("/etc/init.d/"+svc, "status")
 		add(rep, "service "+svc, ok && strings.Contains(out, "running"), out)
 	}
 
-	for _, addr := range []string{"192.168.8.1:22", "192.168.8.1:80"} {
-		c, err := net.DialTimeout("tcp", addr, time.Second)
-		if err == nil {
-			c.Close()
-		}
-		add(rep, "router reachable "+addr, err == nil, errString(err))
-	}
-
-	testJSONAPI(rep, "status", "http://127.0.0.1/api/status")
-	testJSONAPI(rep, "control", "http://127.0.0.1/api/control")
+	testJSONAPI(rep, "status", "http://127.0.0.1:20175/api/status")
+	testJSONAPI(rep, "control", "http://127.0.0.1:20175/api/control")
 }
 func testJSONAPI(rep *Report, name, url string) {
 	req, _ := http.NewRequest(http.MethodGet, url, nil)
@@ -174,15 +171,15 @@ func testJSONAPI(rep *Report, name, url string) {
 		fmt.Sprintf("http=%d bytes=%d err=%v", resp.StatusCode, len(b), err))
 }
 
-func runHealthyProduction(rep *Report) {
-	direct, err := fetchHomeIPViaSocks(prodFrontSocks, 4*time.Second)
+func runHealthyProduction(rep *Report, cfg config.Stack) {
+	direct, err := fetchHomeIPViaSocks(fmt.Sprintf("127.0.0.1:%d", cfg.Front.SocksPort), 4*time.Second)
 	if err == nil && direct != "" {
 		homeIP = direct
 	}
 	add(rep, "healthy direct egress discovered", err == nil && homeIP != "",
 		fmt.Sprintf("ip=%s err=%v", direct, err))
 
-	vpnIP, err := fetchHomeIPViaSocks("127.0.0.1:20173", 6*time.Second)
+	vpnIP, err := fetchHomeIPViaSocks(fmt.Sprintf("127.0.0.1:%d", cfg.Backend.SocksPort), 6*time.Second)
 	add(rep, "healthy VPN backend leaves via VPN",
 		err == nil && vpnIP != "" && vpnIP != homeIP,
 		fmt.Sprintf("ip=%s err=%v", vpnIP, err))
@@ -246,20 +243,20 @@ func fetchViaSocks(socksAddr, url string, timeout time.Duration) ([]byte, error)
 	}
 	return io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 }
-func runIsolatedPolicyTests(rep *Report, tmpDir string) error {
-	frontCfg, err := loadJSON("/etc/xray/vpn-front.json")
+func runIsolatedPolicyTests(rep *Report, tmpDir, assetsDir string) error {
+	frontCfg, err := loadJSON(paths.FrontConfig)
 	if err != nil {
 		return err
 	}
-	failCfg, err := loadJSON("/etc/xray/vpn-policy-failopen.json")
+	failCfg, err := loadJSON(paths.PolicyFailOpen)
 	if err != nil {
 		return err
 	}
-	killCfg, err := loadJSON("/etc/xray/vpn-policy-killswitch.json")
+	killCfg, err := loadJSON(paths.PolicyVPNOnly)
 	if err != nil {
 		return err
 	}
-	blockCfg, err := loadJSON("/etc/xray/vpn-policy-killswitch-blocked.json")
+	blockCfg, err := loadJSON(paths.PolicyBlocked)
 	if err != nil {
 		return err
 	}
@@ -286,12 +283,12 @@ func runIsolatedPolicyTests(rep *Report, tmpDir string) error {
 		return err
 	}
 
-	policyCmd, err := startXray(failPath)
+	policyCmd, err := startXray(failPath, assetsDir)
 	if err != nil {
 		return err
 	}
 	defer stopProcess(policyCmd)
-	frontCmd, err := startXray(frontPath)
+	frontCmd, err := startXray(frontPath, assetsDir)
 	if err != nil {
 		return err
 	}
@@ -307,7 +304,7 @@ func runIsolatedPolicyTests(rep *Report, tmpDir string) error {
 	runFailopenChecks(rep)
 
 	stopProcess(policyCmd)
-	policyCmd, err = startXray(killPath)
+	policyCmd, err = startXray(killPath, assetsDir)
 	if err != nil {
 		return err
 	}
@@ -317,7 +314,7 @@ func runIsolatedPolicyTests(rep *Report, tmpDir string) error {
 	runVPNOnlyChecks(rep)
 
 	stopProcess(policyCmd)
-	policyCmd, err = startXray(blockPath)
+	policyCmd, err = startXray(blockPath, assetsDir)
 	if err != nil {
 		return err
 	}
@@ -459,9 +456,9 @@ func writeJSON(path string, v any) error {
 	return os.WriteFile(path, b, 0600)
 }
 
-func startXray(config string) (*exec.Cmd, error) {
+func startXray(config, assetsDir string) (*exec.Cmd, error) {
 	cmd := exec.Command("/usr/bin/xray", "run", "-config", config)
-	cmd.Env = append(os.Environ(), "XRAY_LOCATION_ASSET=/usr/share/xray")
+	cmd.Env = append(os.Environ(), "XRAY_LOCATION_ASSET="+assetsDir)
 	var stderr bytes.Buffer
 	cmd.Stdout = &stderr
 	cmd.Stderr = &stderr

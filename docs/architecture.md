@@ -72,6 +72,8 @@ Health states:
 
 A down state must remain confirmed before failover.
 
+Backend listener loss is handled before endpoint health probing. If a node is selected but the v2rayA SOCKS listener is absent, the watchdog first gives the manager a short grace window, then repairs backend-only state if needed and restarts v2rayA when the listener is still missing. The restart decision does not depend on the v2raya_core PID: a surviving core process with no SOCKS listener is treated as stuck. Automatic repair is rate-limited to avoid restart loops. While the listener is unavailable, watchdog state is written as down with 0/4 probes so the dashboard never displays stale healthy results.
+
 Candidate eligibility is shared by watchdog, collector and control code. Current transports:
 
 - VLESS TCP + Reality;

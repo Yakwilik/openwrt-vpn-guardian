@@ -49,8 +49,6 @@ define Package/vpn-guardian/install
 	$(call GoPackage/Package/Install/Bin,$(1))
 
 	$(INSTALL_DIR) $(1)/etc/init.d
-	$(INSTALL_BIN) ./files/etc/init.d/vpn-front $(1)/etc/init.d/vpn-front
-	$(INSTALL_BIN) ./files/etc/init.d/vpn-policy $(1)/etc/init.d/vpn-policy
 	$(INSTALL_BIN) ./files/etc/init.d/vpn-guardian-api $(1)/etc/init.d/vpn-guardian-api
 	$(INSTALL_BIN) ./files/etc/init.d/vpn-guardian-bootstrap $(1)/etc/init.d/vpn-guardian-bootstrap
 
@@ -71,7 +69,7 @@ define Package/vpn-guardian/postinst
 #!/bin/sh
 [ -n "$$IPKG_INSTROOT" ] && exit 0
 
-rm -f /etc/vpn-stack/bootstrap-complete
+rm -f /etc/vpn-guardian/bootstrap-complete
 /etc/init.d/vpn-guardian-bootstrap enable >/dev/null 2>&1 || true
 /etc/init.d/vpn-guardian-bootstrap restart >/dev/null 2>&1 || true
 
@@ -100,7 +98,6 @@ define Package/vpn-guardian/postrm
 rm -f /etc/init.d/vpn-front-routing
 rm -f /etc/init.d/vpn-backend-watchdog
 rm -f /etc/init.d/vpn-dashboard-collector
-rm -f /etc/vpn-front.nft
 
 if [ -x /etc/init.d/dnsmasq ]; then
 	uci -q delete dhcp.vpn_guardian

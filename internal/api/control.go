@@ -17,17 +17,18 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Yakwilik/openwrt-vpn-guardian/internal/config"
 	"github.com/Yakwilik/openwrt-vpn-guardian/internal/control"
+	"github.com/Yakwilik/openwrt-vpn-guardian/internal/paths"
 	v2rayautil "github.com/Yakwilik/openwrt-vpn-guardian/internal/v2raya"
 )
 
 const (
-	authPath      = "/etc/vpn-dashboard-auth.json"
-	sessionDir    = "/tmp/vpn-dashboard-sessions"
+	authPath      = paths.AuthConfig
+	sessionDir    = paths.SessionsDir
 	sessionCookie = "vpnctl"
 	sessionTTL    = time.Hour
 	pinRounds     = 150000
-	stackPath     = "/etc/vpn-stack/stack.json"
 )
 
 type authConfig struct {
@@ -433,53 +434,63 @@ func randomHex(n int) (string, error) {
 }
 
 func dashboardPeerAllowed(r *http.Request) bool {
-	peer := r.RemoteAddr
-	if host, _, err := net.SplitHostPort(peer); err == nil {
-		peer = host
-	}
-	peerIP := net.ParseIP(strings.TrimSpace(peer))
+	peerIP := requestPeerIP(r)
 	if peerIP == nil {
 		return false
 	}
 	if peerIP.IsLoopback() {
 		return true
 	}
-
-	var cfg struct {
-		LANCIDR string `json:"lanCidr"`
-	}
-	if err := readJSONFile(stackPath, &cfg); err != nil || cfg.LANCIDR == "" {
-		return false
-	}
-	_, subnet, err := net.ParseCIDR(cfg.LANCIDR)
-	return err == nil && subnet.Contains(peerIP)
+	return ipInCIDR(peerIP, configuredLANCIDR())
 }
 
 func isLANRequest(r *http.Request) bool {
-	peer := r.RemoteAddr
+	clientIP := requestClientIP(r)
+	if clientIP == nil {
+		return false
+	}
+	return ipInCIDR(clientIP, configuredLANCIDR())
+}
+
+func requestPeerIP(r *http.Request) net.IP {
+	if r == nil {
+		return nil
+	}
+	peer := strings.TrimSpace(r.RemoteAddr)
 	if host, _, err := net.SplitHostPort(peer); err == nil {
 		peer = host
 	}
-	peerIP := net.ParseIP(strings.TrimSpace(peer))
+	return net.ParseIP(peer)
+}
+
+func requestClientIP(r *http.Request) net.IP {
+	peerIP := requestPeerIP(r)
 	if peerIP == nil {
+		return nil
+	}
+	if !peerIP.IsLoopback() {
+		return peerIP
+	}
+	if forwarded := net.ParseIP(strings.TrimSpace(r.Header.Get("X-Real-IP"))); forwarded != nil {
+		return forwarded
+	}
+	return peerIP
+}
+
+func configuredLANCIDR() string {
+	cfg, err := config.LoadStack()
+	if err != nil {
+		return ""
+	}
+	return cfg.LANCIDR
+}
+
+func ipInCIDR(ip net.IP, cidr string) bool {
+	if ip == nil || cidr == "" {
 		return false
 	}
-
-	remoteIP := peerIP
-	if peerIP.IsLoopback() {
-		if forwarded := net.ParseIP(strings.TrimSpace(r.Header.Get("X-Real-IP"))); forwarded != nil {
-			remoteIP = forwarded
-		}
-	}
-
-	var cfg struct {
-		LANCIDR string `json:"lanCidr"`
-	}
-	if err := readJSONFile(stackPath, &cfg); err != nil || cfg.LANCIDR == "" {
-		return remoteIP.IsLoopback()
-	}
-	_, subnet, err := net.ParseCIDR(cfg.LANCIDR)
-	return err == nil && subnet.Contains(remoteIP)
+	_, subnet, err := net.ParseCIDR(cidr)
+	return err == nil && subnet.Contains(ip)
 }
 
 func readJSONFile(path string, dst any) error {

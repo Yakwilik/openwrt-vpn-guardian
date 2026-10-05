@@ -13,12 +13,14 @@ device: GL.iNet GL-MT6000
 
 ## Build
 
-1. Run go test ./....
-2. Run the CGO-disabled cross-build matrix.
-3. Build the IPK with the matching official OpenWrt SDK.
-4. Verify the packaged vpn-guardian ELF is statically linked.
-5. Verify readelf reports no NEEDED dynamic libraries.
-6. Inspect the IPK file list: one vpn-guardian binary, required init/hotplug files, config examples and optional nginx config only.
+1. Re-enable the OpenWrt package workflow that is intentionally disabled during active development.
+2. Run go test ./....
+3. Run go vet ./....
+4. Run the CGO-disabled cross-build matrix.
+5. Build the IPK with the matching official OpenWrt SDK.
+6. Verify the packaged vpn-guardian ELF is statically linked.
+7. Verify readelf reports no NEEDED dynamic libraries.
+8. Inspect the IPK file list: one vpn-guardian binary, required init/hotplug files, config examples and optional nginx config only.
 
 ## Safe install preconditions
 
@@ -38,7 +40,7 @@ device: GL.iNet GL-MT6000
 6. If no VPN node is configured, confirm bootstrap stays pending and ordinary direct traffic is unaffected.
 7. Add/import a VPN subscription.
 8. Confirm bootstrap completes automatically.
-9. Confirm /etc/vpn-stack/bootstrap-complete exists.
+9. Confirm /etc/vpn-guardian/bootstrap-complete exists.
 
 ## Runtime validation
 

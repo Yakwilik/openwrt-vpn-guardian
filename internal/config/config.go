@@ -1,0 +1,244 @@
+package config
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"time"
+
+	"github.com/Yakwilik/openwrt-vpn-guardian/internal/paths"
+)
+
+const Version = 1
+
+type Stack struct {
+	Version      int       `json:"version"`
+	LANInterface string    `json:"lanInterface"`
+	LANCIDR      string    `json:"lanCidr"`
+	WANInterface string    `json:"wanInterface"`
+	AssetsDir    string    `json:"assetsDir"`
+	Front        Front     `json:"front"`
+	Backend      Backend   `json:"backend"`
+	Dashboard    Dashboard `json:"dashboard"`
+	Policy       Policy    `json:"policy"`
+	Bypass4      []string  `json:"bypass4"`
+}
+
+type Front struct {
+	SocksPort        int `json:"socksPort"`
+	TProxyPort       int `json:"tproxyPort"`
+	PolicyPort       int `json:"policyPort"`
+	Mark             int `json:"mark"`
+	RouteTable       int `json:"routeTable"`
+	DirectSocketMark int `json:"directSocketMark"`
+}
+
+type Backend struct {
+	SocksPort        int    `json:"socksPort"`
+	WatchdogInterval string `json:"watchdogInterval"`
+}
+
+type Dashboard struct {
+	CollectorInterval string `json:"collectorInterval"`
+}
+
+type Policy struct {
+	Default       string `json:"default"`
+	ProbeURL      string `json:"probeUrl"`
+	ProbeInterval string `json:"probeInterval"`
+}
+
+type Routing struct {
+	Version      int      `json:"version"`
+	ProxyDomains []string `json:"proxyDomains"`
+	ProxyIPs     []string `json:"proxyIps"`
+}
+
+func DefaultStack(lanInterface, lanCIDR, wanInterface, assetsDir string) Stack {
+	return Stack{
+		Version:      Version,
+		LANInterface: lanInterface,
+		LANCIDR:      lanCIDR,
+		WANInterface: wanInterface,
+		AssetsDir:    assetsDir,
+		Front: Front{
+			SocksPort:        20174,
+			TProxyPort:       52346,
+			PolicyPort:       20177,
+			Mark:             192,
+			RouteTable:       101,
+			DirectSocketMark: 128,
+		},
+		Backend: Backend{
+			SocksPort:        20173,
+			WatchdogInterval: "10s",
+		},
+		Dashboard: Dashboard{
+			CollectorInterval: "3s",
+		},
+		Policy: Policy{
+			Default:       "killswitch",
+			ProbeURL:      "https://connectivitycheck.gstatic.com/generate_204",
+			ProbeInterval: "5s",
+		},
+		Bypass4: []string{
+			"0.0.0.0/8",
+			"10.0.0.0/8",
+			"100.64.0.0/10",
+			"127.0.0.0/8",
+			"169.254.0.0/16",
+			"172.16.0.0/12",
+			"192.168.0.0/16",
+			"224.0.0.0/3",
+		},
+	}
+}
+
+func DefaultRouting() Routing {
+	return Routing{
+		Version: Version,
+		ProxyDomains: []string{
+			"geosite:openai",
+			"geosite:anthropic",
+			"geosite:google-gemini",
+			"geosite:github",
+			"geosite:youtube",
+			"geosite:telegram",
+			"geosite:whatsapp",
+			"geosite:soundcloud",
+			"geosite:linkedin",
+			"domain:buf.build",
+		},
+	}
+}
+
+func Load() (Stack, Routing, error) {
+	return LoadFiles(paths.StackConfig, paths.RoutingConfig)
+}
+
+func LoadStack() (Stack, error) {
+	var cfg Stack
+	if err := readJSON(paths.StackConfig, &cfg); err != nil {
+		return cfg, err
+	}
+	if err := cfg.Validate(); err != nil {
+		return Stack{}, err
+	}
+	return cfg, nil
+}
+
+func LoadFiles(stackPath, routingPath string) (Stack, Routing, error) {
+	var stack Stack
+	var routing Routing
+
+	if err := readJSON(stackPath, &stack); err != nil {
+		return stack, routing, err
+	}
+	if err := readJSON(routingPath, &routing); err != nil {
+		return stack, routing, err
+	}
+	if err := stack.Validate(); err != nil {
+		return stack, routing, err
+	}
+	if err := routing.Validate(); err != nil {
+		return stack, routing, err
+	}
+	return stack, routing, nil
+}
+
+func (s Stack) Validate() error {
+	if s.Version != Version {
+		return fmt.Errorf("unsupported stack manifest version %d", s.Version)
+	}
+	if s.LANInterface == "" || s.LANCIDR == "" {
+		return errors.New("LAN config missing")
+	}
+	if s.WANInterface == "" {
+		return errors.New("WAN interface missing")
+	}
+	if s.AssetsDir == "" {
+		return errors.New("Xray assets directory missing")
+	}
+
+	if err := validatePort("front.socksPort", s.Front.SocksPort); err != nil {
+		return err
+	}
+	if err := validatePort("front.tproxyPort", s.Front.TProxyPort); err != nil {
+		return err
+	}
+	if err := validatePort("front.policyPort", s.Front.PolicyPort); err != nil {
+		return err
+	}
+	if err := validatePort("backend.socksPort", s.Backend.SocksPort); err != nil {
+		return err
+	}
+	if s.Front.RouteTable <= 0 {
+		return errors.New("front.routeTable must be positive")
+	}
+	if s.Front.Mark <= 0 {
+		return errors.New("front.mark must be positive")
+	}
+	if s.Front.DirectSocketMark <= 0 {
+		return errors.New("front.directSocketMark must be positive")
+	}
+
+	switch s.Policy.Default {
+	case "killswitch", "failopen", "direct":
+	default:
+		return fmt.Errorf("invalid policy.default %q", s.Policy.Default)
+	}
+
+	if _, err := parsePositiveDuration("backend.watchdogInterval", s.Backend.WatchdogInterval); err != nil {
+		return err
+	}
+	if _, err := parsePositiveDuration("dashboard.collectorInterval", s.Dashboard.CollectorInterval); err != nil {
+		return err
+	}
+	if _, err := parsePositiveDuration("policy.probeInterval", s.Policy.ProbeInterval); err != nil {
+		return err
+	}
+	if s.Policy.ProbeURL == "" {
+		return errors.New("policy.probeUrl is required")
+	}
+	if len(s.Bypass4) == 0 {
+		return errors.New("bypass4 must not be empty")
+	}
+	return nil
+}
+
+func (r Routing) Validate() error {
+	if r.Version != Version {
+		return fmt.Errorf("unsupported routing manifest version %d", r.Version)
+	}
+	return nil
+}
+
+func validatePort(name string, port int) error {
+	if port < 1 || port > 65535 {
+		return fmt.Errorf("%s must be between 1 and 65535", name)
+	}
+	return nil
+}
+
+func parsePositiveDuration(name, value string) (time.Duration, error) {
+	duration, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", name, err)
+	}
+	if duration <= 0 {
+		return 0, fmt.Errorf("%s must be positive", name)
+	}
+	return duration, nil
+}
+
+func readJSON(path string, dst any) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	if err := json.Unmarshal(data, dst); err != nil {
+		return fmt.Errorf("decode %s: %w", path, err)
+	}
+	return nil
+}

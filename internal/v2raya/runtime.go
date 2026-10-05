@@ -36,6 +36,24 @@ type RuntimeState struct {
 	SOCKS       bool   `json:"socks"`
 }
 
+type repairAction uint8
+
+const (
+	repairNone repairAction = iota
+	repairConfigureBackend
+	repairRestartManager
+)
+
+func classifyRepair(state RuntimeState) repairAction {
+	if state.SOCKS || !state.Selected {
+		return repairNone
+	}
+	if !state.Manager || state.Transparent != "close" || !state.Running {
+		return repairConfigureBackend
+	}
+	return repairRestartManager
+}
+
 func BackendSOCKSReady() bool {
 	conn, err := net.DialTimeout("tcp", backendSOCKSAddr, 500*time.Millisecond)
 	if err != nil {
@@ -177,7 +195,8 @@ func RepairBackendListener(force bool) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	if !state.Selected {
+	action := classifyRepair(state)
+	if action == repairNone {
 		return false, nil
 	}
 	if !force && repairThrottled() {
@@ -185,7 +204,7 @@ func RepairBackendListener(force bool) (bool, error) {
 	}
 	recordRepairAttempt()
 
-	if state.Transparent != "close" || !state.Running {
+	if action == repairConfigureBackend {
 		if err := EnsureBackendOnly(); err != nil {
 			return false, err
 		}
@@ -207,13 +226,13 @@ func RepairBackendListener(force bool) (bool, error) {
 	}
 	state, _ = InspectRuntime()
 
-	// system:running=true with no core means the manager got stuck after the
-	// core exited. Restart only in that state; a live core without a listener
-	// may simply have no usable outbound.
-	if !state.Core {
-		if err := service("restart"); err != nil {
-			return false, err
-		}
+	// A selected backend with no SOCKS listener is unusable regardless of
+	// whether v2raya_core still has a PID. The core may have exited, or it may
+	// be stuck in a state where the process survives but its listener does not.
+	// Restart the manager once after the grace window; the outer cooldown keeps
+	// this from turning backend failures into a restart loop.
+	if err := service("restart"); err != nil {
+		return false, err
 	}
 
 	deadline := time.Now().Add(8 * time.Second)

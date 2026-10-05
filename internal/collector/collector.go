@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Yakwilik/openwrt-vpn-guardian/internal/config"
+	"github.com/Yakwilik/openwrt-vpn-guardian/internal/paths"
 	v2rayautil "github.com/Yakwilik/openwrt-vpn-guardian/internal/v2raya"
 
 	"golang.org/x/net/proxy"
@@ -22,12 +24,10 @@ import (
 
 const (
 	dbPath      = "/etc/v2raya/v2raya.db"
-	stackPath   = "/etc/vpn-stack/stack.json"
-	controlPath = "/etc/vpn-stack/control.json"
-	statePath   = "/tmp/vpn-guardian-watchdog-state.json"
-	cachePath   = "/tmp/vpn-status-cache.json"
-	historyPath = "/tmp/vpn-dashboard-history.tsv"
-	proxyAddr   = "127.0.0.1:20173"
+	controlPath = paths.ControlConfig
+	statePath   = paths.WatchdogState
+	cachePath   = paths.StatusCache
+	historyPath = paths.History
 )
 
 type ProbeResult struct {
@@ -60,27 +60,22 @@ type Control struct {
 	FailurePolicy string `json:"failurePolicy"`
 }
 
-type StackConfig struct {
-	Front struct {
-		TProxyPort int `json:"tproxyPort"`
-		RouteTable int `json:"routeTable"`
-	} `json:"front"`
-}
 type ServiceStatus struct {
-	V2rayA string `json:"v2raya"`
-	Xray   string `json:"xray"`
-	Zapret string `json:"zapret2"`
-	Front  string `json:"front"`
-	Policy string `json:"policy"`
+	V2rayA    string `json:"v2raya"`
+	Front     string `json:"front"`
+	Policy    string `json:"policy"`
+	Watchdog  string `json:"watchdog"`
+	Collector string `json:"collector"`
+	API       string `json:"api"`
 }
 
 type TProxyStatus struct {
-	NFT        bool `json:"nft"`
-	Policy     bool `json:"policy"`
-	Route      bool `json:"route100"`
-	Socks20173 bool `json:"socks20173"`
-	FrontPort  bool `json:"front_port"`
-	RouteTable int  `json:"route_table"`
+	NFT          bool `json:"nft"`
+	Policy       bool `json:"policy"`
+	Route        bool `json:"route"`
+	BackendSOCKS bool `json:"backend_socks"`
+	FrontPort    bool `json:"front_port"`
+	RouteTable   int  `json:"route_table"`
 }
 
 type HealthBrief struct {
@@ -99,7 +94,7 @@ type Status struct {
 	Node               string                 `json:"node"`
 	Protocol           string                 `json:"protocol"`
 	Endpoint           string                 `json:"endpoint"`
-	EgressIP           string                 `json:"liberty_ip"`
+	EgressIP           string                 `json:"vpn_ip"`
 	HomeIP             string                 `json:"home_ip"`
 	Transparent        string                 `json:"transparent"`
 	PACMode            string                 `json:"pac_mode"`
@@ -172,8 +167,10 @@ func collectSnapshot(rt *runtimeState) (Status, error) {
 	out.Now = time.Now().Unix()
 	out.Architecture = "front"
 
-	var stack StackConfig
-	_ = readJSON(stackPath, &stack)
+	stack, err := config.LoadStack()
+	if err != nil {
+		return out, fmt.Errorf("load stack config: %w", err)
+	}
 
 	var ctrl Control
 	_ = readJSON(controlPath, &ctrl)
@@ -185,8 +182,8 @@ func collectSnapshot(rt *runtimeState) (Status, error) {
 	}
 	out.ControlMode = ctrl.Mode
 	out.FailurePolicy = ctrl.FailurePolicy
-	out.PolicyMode = readTrimmed("/etc/vpn-policy-mode")
-	out.PolicyRuntime = readTrimmed("/etc/vpn-policy-runtime")
+	out.PolicyMode = readTrimmed(paths.PolicyMode)
+	out.PolicyRuntime = readTrimmed(paths.PolicyRuntime)
 
 	var state WatchdogState
 	_ = readJSON(statePath, &state)
@@ -219,11 +216,12 @@ func collectSnapshot(rt *runtimeState) (Status, error) {
 	out.DesiredTransparent = "close"
 
 	out.Services = ServiceStatus{
-		V2rayA: serviceState("v2raya"),
-		Xray:   serviceState("xray"),
-		Zapret: serviceState("zapret2"),
-		Front:  serviceState("vpn-front"),
-		Policy: serviceState("vpn-policy"),
+		V2rayA:    serviceState("v2raya"),
+		Front:     serviceState("vpn-front"),
+		Policy:    serviceState("vpn-policy"),
+		Watchdog:  serviceState("vpn-backend-watchdog"),
+		Collector: serviceState("vpn-dashboard-collector"),
+		API:       serviceState("vpn-guardian-api"),
 	}
 	out.TProxy = inspectTProxy(stack)
 	out.TProxyActive = out.TProxy.NFT && out.TProxy.Policy && out.TProxy.Route && out.TProxy.FrontPort
@@ -237,7 +235,7 @@ func collectSnapshot(rt *runtimeState) (Status, error) {
 	out.HomeIP = rt.lastHome
 
 	if rt.lastEgress == "" || time.Since(rt.lastEgressAt) >= 30*time.Second {
-		if ip, err := fetchEgressIP(); err == nil {
+		if ip, err := fetchEgressIP(stack.Backend.SocksPort); err == nil {
 			rt.lastEgress = ip
 			rt.lastEgressAt = time.Now()
 		}
@@ -380,23 +378,14 @@ func overallStatus(ctrl Control, health HealthResult, frontOK bool) string {
 		return "ok"
 	}
 }
-func inspectTProxy(stack StackConfig) TProxyStatus {
-	table := stack.Front.RouteTable
-	if table == 0 {
-		table = 101
-	}
-	frontPort := stack.Front.TProxyPort
-	if frontPort == 0 {
-		frontPort = 52346
-	}
-
+func inspectTProxy(stack config.Stack) TProxyStatus {
 	return TProxyStatus{
-		NFT:        commandOK("nft", "list", "table", "inet", "vpn_front"),
-		Policy:     commandContains("ip", []string{"rule", "show"}, fmt.Sprintf("lookup %d", table)),
-		Route:      commandContains("ip", []string{"route", "show", "table", fmt.Sprint(table)}, "local default dev lo"),
-		Socks20173: portReady("127.0.0.1:20173"),
-		FrontPort:  portReady(fmt.Sprintf("127.0.0.1:%d", frontPort)),
-		RouteTable: table,
+		NFT:          commandOK("nft", "list", "table", "inet", "vpn_front"),
+		Policy:       commandContains("ip", []string{"rule", "show"}, fmt.Sprintf("lookup %d", stack.Front.RouteTable)),
+		Route:        commandContains("ip", []string{"route", "show", "table", fmt.Sprint(stack.Front.RouteTable)}, "local default dev lo"),
+		BackendSOCKS: portReady(fmt.Sprintf("127.0.0.1:%d", stack.Backend.SocksPort)),
+		FrontPort:    portReady(fmt.Sprintf("127.0.0.1:%d", stack.Front.TProxyPort)),
+		RouteTable:   stack.Front.RouteTable,
 	}
 }
 
@@ -434,9 +423,9 @@ func fetchDirectIP() (string, error) {
 	return fetchPublicIP(&http.Client{Transport: tr, Timeout: 5 * time.Second})
 }
 
-func fetchEgressIP() (string, error) {
+func fetchEgressIP(socksPort int) (string, error) {
 	base := &net.Dialer{Timeout: 1500 * time.Millisecond}
-	dialer, err := proxy.SOCKS5("tcp", proxyAddr, nil, base)
+	dialer, err := proxy.SOCKS5("tcp", fmt.Sprintf("127.0.0.1:%d", socksPort), nil, base)
 	if err != nil {
 		return "", err
 	}

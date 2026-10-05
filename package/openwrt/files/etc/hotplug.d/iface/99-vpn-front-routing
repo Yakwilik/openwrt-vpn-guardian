@@ -1,5 +1,5 @@
 #!/bin/sh
 [ "$ACTION" = ifup ] || exit 0
-[ -f /etc/vpn-front-enabled ] || exit 0
+[ -f /etc/vpn-guardian/front-enabled ] || exit 0
 [ -x /etc/init.d/vpn-front-routing ] || exit 0
 /etc/init.d/vpn-front-routing reload >/dev/null 2>&1

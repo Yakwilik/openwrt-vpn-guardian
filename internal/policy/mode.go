@@ -9,16 +9,12 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-)
 
-const (
-	modePath    = "/etc/vpn-policy-mode"
-	runtimePath = "/etc/vpn-policy-runtime"
-	configPath  = "/etc/xray/vpn-policy.json"
+	"github.com/Yakwilik/openwrt-vpn-guardian/internal/paths"
 )
 
 func Status() string {
-	if b, err := os.ReadFile(modePath); err == nil {
+	if b, err := os.ReadFile(paths.PolicyMode); err == nil {
 		if mode := strings.TrimSpace(string(b)); validPublicMode(mode) {
 			return mode
 		}
@@ -27,7 +23,7 @@ func Status() string {
 }
 
 func Runtime() string {
-	if b, err := os.ReadFile(runtimePath); err == nil {
+	if b, err := os.ReadFile(paths.PolicyRuntime); err == nil {
 		mode := strings.TrimSpace(string(b))
 		if validRuntimeMode(mode) {
 			return mode
@@ -45,7 +41,7 @@ func Apply(mode string) error {
 		public = "killswitch"
 	}
 
-	src := "/etc/xray/vpn-policy-" + mode + ".json"
+	src := filepath.Join(paths.GeneratedDir, "policy-"+mode+".json")
 	if _, err := os.Stat(src); err != nil {
 		return fmt.Errorf("policy config %s: %w", src, err)
 	}
@@ -53,7 +49,7 @@ func Apply(mode string) error {
 		return fmt.Errorf("validate %s: %w: %s", src, err, strings.TrimSpace(string(out)))
 	}
 
-	if err := copyAtomic(src, configPath, 0600); err != nil {
+	if err := copyAtomic(src, paths.PolicyConfig, 0600); err != nil {
 		return err
 	}
 
@@ -65,11 +61,11 @@ func Apply(mode string) error {
 	}
 
 	if mode != "killswitch-blocked" {
-		if err := writeAtomic(modePath, []byte(public+"\n"), 0600); err != nil {
+		if err := writeAtomic(paths.PolicyMode, []byte(public+"\n"), 0600); err != nil {
 			return err
 		}
 	}
-	return writeAtomic(runtimePath, []byte(mode+"\n"), 0600)
+	return writeAtomic(paths.PolicyRuntime, []byte(mode+"\n"), 0600)
 }
 
 func validPublicMode(mode string) bool {

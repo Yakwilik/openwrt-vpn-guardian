@@ -1,13 +1,8 @@
 package watchdog
 
 import (
-	"bytes"
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -22,24 +17,24 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Yakwilik/openwrt-vpn-guardian/internal/paths"
 	"github.com/Yakwilik/openwrt-vpn-guardian/internal/policy"
 	v2rayautil "github.com/Yakwilik/openwrt-vpn-guardian/internal/v2raya"
 
 	"golang.org/x/net/proxy"
 	"golang.org/x/sys/unix"
-	_ "modernc.org/sqlite"
 )
 
 const (
 	dbPath            = "/etc/v2raya/v2raya.db"
-	controlPath       = "/etc/vpn-stack/control.json"
-	statePath         = "/tmp/vpn-guardian-watchdog-state.json"
-	eventPath         = "/tmp/vpn-dashboard-events.tsv"
+	controlPath       = paths.ControlConfig
+	statePath         = paths.WatchdogState
+	eventPath         = paths.Events
 	proxyAddr         = "127.0.0.1:20173"
 	tag               = "vpn-guardian-watchdog"
-	policyRuntimePath = "/etc/vpn-policy-runtime"
-	policyModePath    = "/etc/vpn-policy-mode"
-	lockPath          = "/tmp/vpn-guardian-control.lock"
+	policyRuntimePath = paths.PolicyRuntime
+	policyModePath    = paths.PolicyMode
+	lockPath          = paths.ControlLock
 )
 
 type Candidate struct {
@@ -103,6 +98,18 @@ type HealthResult struct {
 	Passed  int           `json:"passed"`
 	Total   int           `json:"total"`
 	Results []ProbeResult `json:"results"`
+}
+
+type healthTarget struct {
+	Name string
+	URL  string
+}
+
+var healthTargets = []healthTarget{
+	{Name: "google", URL: "https://connectivitycheck.gstatic.com/generate_204"},
+	{Name: "cloudflare", URL: "https://cp.cloudflare.com/generate_204"},
+	{Name: "apple", URL: "https://captive.apple.com/hotspot-detect.html"},
+	{Name: "firefox", URL: "https://detectportal.firefox.com/canonical.html"},
 }
 
 func main() {
@@ -185,13 +192,11 @@ func daemon(interval time.Duration) error {
 }
 
 func openDB() (*sql.DB, error) {
-	return sql.Open("sqlite", "file:"+dbPath+"?_pragma=busy_timeout(5000)")
+	return v2rayautil.OpenDB()
 }
 
 func getRaw(db *sql.DB, key string) (string, error) {
-	var v string
-	err := db.QueryRow("SELECT value FROM system_config WHERE key=?", key).Scan(&v)
-	return v, err
+	return v2rayautil.GetRaw(db, key)
 }
 
 func str(m map[string]any, keys ...string) string {
@@ -505,74 +510,8 @@ func logLine(format string, args ...any) {
 	appendDashboardEvent(msg)
 }
 
-func signLocalJWT(db *sql.DB) (string, error) {
-	raw, err := getRaw(db, "system:jwtSecret")
-	if err != nil {
-		return "", err
-	}
-	var secretHex string
-	if err := json.Unmarshal([]byte(raw), &secretHex); err != nil {
-		return "", err
-	}
-	secret, err := hex.DecodeString(secretHex)
-	if err != nil || len(secret) == 0 {
-		return "", errors.New("invalid local JWT secret")
-	}
-
-	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
-	payloadBytes, _ := json.Marshal(map[string]any{
-		"uname": "vpn-backend-watchdog",
-		"exp":   time.Now().Add(10 * time.Minute).Unix(),
-	})
-	payload := base64.RawURLEncoding.EncodeToString(payloadBytes)
-	unsigned := header + "." + payload
-	mac := hmac.New(sha256.New, secret)
-	_, _ = mac.Write([]byte(unsigned))
-	return unsigned + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil)), nil
-}
 func apiCall(method, path string, payload any, timeout time.Duration) (map[string]any, error) {
-	db, err := openDB()
-	if err != nil {
-		return nil, err
-	}
-	token, err := signLocalJWT(db)
-	db.Close()
-	if err != nil {
-		return nil, err
-	}
-
-	var body io.Reader
-	if payload != nil {
-		b, err := json.Marshal(payload)
-		if err != nil {
-			return nil, err
-		}
-		body = bytes.NewReader(b)
-	}
-	req, err := http.NewRequest(method, "http://127.0.0.1:2017/api/"+path, body)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", token)
-	if payload != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-
-	resp, err := (&http.Client{Timeout: timeout}).Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	var env map[string]any
-	if err := json.Unmarshal(b, &env); err != nil {
-		return nil, fmt.Errorf("invalid API JSON: HTTP %d", resp.StatusCode)
-	}
-	if resp.StatusCode >= 400 || fmt.Sprint(env["code"]) != "SUCCESS" {
-		return nil, fmt.Errorf("API %s %s failed: HTTP %d code=%v message=%v",
-			method, path, resp.StatusCode, env["code"], env["message"])
-	}
-	return env, nil
+	return v2rayautil.CallAPI("vpn-guardian-watchdog", method, path, payload, timeout)
 }
 func setCandidate(c Candidate) error {
 	body := map[string]any{
@@ -628,19 +567,30 @@ func ensureBackend() bool {
 	}
 	return ready
 }
-func health(timeout time.Duration) HealthResult {
-	targets := []struct{ Name, URL string }{
-		{"google", "https://connectivitycheck.gstatic.com/generate_204"},
-		{"cloudflare", "https://cp.cloudflare.com/generate_204"},
-		{"apple", "https://captive.apple.com/hotspot-detect.html"},
-		{"firefox", "https://detectportal.firefox.com/canonical.html"},
+func backendUnavailableHealth(reason string) HealthResult {
+	result := HealthResult{
+		Status:  "down",
+		Healthy: false,
+		Total:   len(healthTargets),
+		Results: make([]ProbeResult, len(healthTargets)),
 	}
-	result := HealthResult{Status: "down", Total: len(targets), Results: make([]ProbeResult, len(targets))}
+	for i, target := range healthTargets {
+		result.Results[i] = ProbeResult{
+			Name:  target.Name,
+			URL:   target.URL,
+			Error: reason,
+		}
+	}
+	return result
+}
+
+func health(timeout time.Duration) HealthResult {
+	result := HealthResult{Status: "down", Total: len(healthTargets), Results: make([]ProbeResult, len(healthTargets))}
 
 	base := &net.Dialer{Timeout: 2500 * time.Millisecond}
 	socks, err := proxy.SOCKS5("tcp", proxyAddr, nil, base)
 	if err != nil {
-		for i, t := range targets {
+		for i, t := range healthTargets {
 			result.Results[i] = ProbeResult{Name: t.Name, URL: t.URL, Error: err.Error()}
 		}
 		return result
@@ -666,7 +616,7 @@ func health(timeout time.Duration) HealthResult {
 	defer tr.CloseIdleConnections()
 	client := &http.Client{Transport: tr, Timeout: timeout}
 	var wg sync.WaitGroup
-	for i, t := range targets {
+	for i, t := range healthTargets {
 		i, t := i, t
 		wg.Add(1)
 		go func() {
@@ -784,10 +734,14 @@ func run(logHealthy bool) error {
 		}
 	}
 	if !ensureBackend() {
+		now := time.Now().Unix()
 		s.Failures++
-		s.LastFailure = time.Now().Unix()
-		s.LastError = "backend listener unavailable after start attempt"
+		s.LastCheck = now
+		s.LastFailure = now
+		s.LastError = "backend listener unavailable after runtime repair"
+		s.LastHealth = backendUnavailableHealth(s.LastError)
 		saveState(s)
+		logLine("backend health -> %s", healthSummary(s.LastHealth))
 		return errors.New(s.LastError)
 	}
 

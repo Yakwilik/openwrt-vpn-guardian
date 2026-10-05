@@ -7,12 +7,14 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/Yakwilik/openwrt-vpn-guardian/internal/paths"
 )
 
 const (
-	cachePath   = "/tmp/vpn-status-cache.json"
-	historyPath = "/tmp/vpn-dashboard-history.tsv"
-	eventPath   = "/tmp/vpn-dashboard-events.tsv"
+	cachePath   = paths.StatusCache
+	historyPath = paths.History
+	eventPath   = paths.Events
 )
 
 type Sample struct {

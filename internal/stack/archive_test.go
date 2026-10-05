@@ -62,8 +62,8 @@ func writeTestArchive(t *testing.T, entries []archiveEntry) string {
 
 func TestExtractArchivePreservesRelativeSymlink(t *testing.T) {
 	archive := writeTestArchive(t, []archiveEntry{
-		{name: "usr/bin/vpn-guardian", typeflag: tar.TypeReg, body: "binary", mode: 0755},
-		{name: "usr/bin/vpn-stack", typeflag: tar.TypeSymlink, linkname: "vpn-guardian", mode: 0777},
+		{name: "usr/lib/vpn-guardian/runtime", typeflag: tar.TypeReg, body: "payload", mode: 0644},
+		{name: "usr/lib/vpn-guardian/current", typeflag: tar.TypeSymlink, linkname: "runtime", mode: 0777},
 	})
 
 	dst := t.TempDir()
@@ -71,7 +71,7 @@ func TestExtractArchivePreservesRelativeSymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	link := filepath.Join(dst, "usr/bin/vpn-stack")
+	link := filepath.Join(dst, "usr/lib/vpn-guardian/current")
 	info, err := os.Lstat(link)
 	if err != nil {
 		t.Fatal(err)
@@ -83,14 +83,14 @@ func TestExtractArchivePreservesRelativeSymlink(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if target != "vpn-guardian" {
-		t.Fatalf("symlink target = %q, want vpn-guardian", target)
+	if target != "runtime" {
+		t.Fatalf("symlink target = %q, want runtime", target)
 	}
 }
 
 func TestExtractArchiveRejectsEscapingSymlink(t *testing.T) {
 	archive := writeTestArchive(t, []archiveEntry{
-		{name: "usr/bin/vpn-stack", typeflag: tar.TypeSymlink, linkname: "../../../outside", mode: 0777},
+		{name: "usr/lib/vpn-guardian/current", typeflag: tar.TypeSymlink, linkname: "../../../../outside", mode: 0777},
 	})
 
 	if err := extractArchive(archive, t.TempDir()); err == nil {

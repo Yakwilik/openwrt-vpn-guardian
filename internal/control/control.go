@@ -1,13 +1,8 @@
 package control
 
 import (
-	"bytes"
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -24,16 +19,16 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Yakwilik/openwrt-vpn-guardian/internal/paths"
 	"github.com/Yakwilik/openwrt-vpn-guardian/internal/policy"
 	v2rayautil "github.com/Yakwilik/openwrt-vpn-guardian/internal/v2raya"
 
 	"golang.org/x/sys/unix"
-	_ "modernc.org/sqlite"
 )
 
 const dbPath = "/etc/v2raya/v2raya.db"
-const statePath = "/tmp/vpn-guardian-control-state.json"
-const controlPath = "/etc/vpn-stack/control.json"
+const statePath = paths.ControlState
+const controlPath = paths.ControlConfig
 const proxyURL = "socks5://127.0.0.1:20173"
 
 type Candidate struct {
@@ -151,16 +146,13 @@ func main() {
 }
 
 func openDB() (*sql.DB, error) {
-	return sql.Open("sqlite", "file:"+dbPath+"?_pragma=busy_timeout(5000)")
+	return v2rayautil.OpenDB()
 }
 func getRaw(db *sql.DB, key string) (string, error) {
-	var v string
-	err := db.QueryRow("SELECT value FROM system_config WHERE key=?", key).Scan(&v)
-	return v, err
+	return v2rayautil.GetRaw(db, key)
 }
 func putRaw(db *sql.DB, key, value string) error {
-	_, err := db.Exec("INSERT OR REPLACE INTO system_config(key,value) VALUES(?,?)", key, value)
-	return err
+	return v2rayautil.PutRaw(db, key, value)
 }
 
 func str(m map[string]any, keys ...string) string {
@@ -283,74 +275,8 @@ func setConnected(db *sql.DB, c Candidate) error {
 	return nil
 }
 
-func signLocalJWT(db *sql.DB) (string, error) {
-	raw, err := getRaw(db, "system:jwtSecret")
-	if err != nil {
-		return "", fmt.Errorf("read local JWT secret: %w", err)
-	}
-	var secretHex string
-	if err := json.Unmarshal([]byte(raw), &secretHex); err != nil {
-		return "", fmt.Errorf("decode local JWT secret: %w", err)
-	}
-	secret, err := hex.DecodeString(secretHex)
-	if err != nil || len(secret) == 0 {
-		return "", fmt.Errorf("invalid local JWT secret")
-	}
-
-	headerJSON := "{\"alg\":\"HS256\",\"typ\":\"JWT\"}"
-	header := base64.RawURLEncoding.EncodeToString([]byte(headerJSON))
-	payloadBytes, _ := json.Marshal(map[string]any{
-		"uname": "vpn-guardian",
-		"exp":   time.Now().Add(10 * time.Minute).Unix(),
-	})
-	payload := base64.RawURLEncoding.EncodeToString(payloadBytes)
-	unsigned := header + "." + payload
-	mac := hmac.New(sha256.New, secret)
-	_, _ = mac.Write([]byte(unsigned))
-	sig := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
-	return unsigned + "." + sig, nil
-}
-
 func apiCall(method, path string, payload any, timeout time.Duration) (any, error) {
-	db, err := openDB()
-	if err != nil {
-		return nil, err
-	}
-	token, err := signLocalJWT(db)
-	db.Close()
-	if err != nil {
-		return nil, err
-	}
-	var body io.Reader
-	if payload != nil {
-		b, err := json.Marshal(payload)
-		if err != nil {
-			return nil, err
-		}
-		body = bytes.NewReader(b)
-	}
-	req, err := http.NewRequest(method, "http://127.0.0.1:2017/api/"+path, body)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", token)
-	if payload != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	resp, err := (&http.Client{Timeout: timeout}).Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("v2rayA API %s %s: %w", method, path, err)
-	}
-	defer resp.Body.Close()
-	b, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
-	var env map[string]any
-	if err := json.Unmarshal(b, &env); err != nil {
-		return nil, fmt.Errorf("v2rayA API %s returned invalid JSON: HTTP %d", path, resp.StatusCode)
-	}
-	if resp.StatusCode >= 400 || fmt.Sprint(env["code"]) != "SUCCESS" {
-		return nil, fmt.Errorf("v2rayA API %s failed: HTTP %d code=%v error=%v message=%v", path, resp.StatusCode, env["code"], env["errorCode"], env["message"])
-	}
-	return env["data"], nil
+	return v2rayautil.CallAPIData("vpn-guardian-control", method, path, payload, timeout)
 }
 
 func touchData() (map[string]any, error) {
@@ -807,11 +733,7 @@ func apiSetOne(want Candidate) error {
 		db.Close()
 		return err
 	}
-	token, err := signLocalJWT(db)
 	db.Close()
-	if err != nil {
-		return err
-	}
 
 	body := map[string]any{
 		"outbound": "proxy",
@@ -824,28 +746,8 @@ func apiSetOne(want Candidate) error {
 			},
 		},
 	}
-	b, _ := json.Marshal(body)
-	req, err := http.NewRequest(http.MethodPut, "http://127.0.0.1:2017/api/outboundConnections", bytes.NewReader(b))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", token)
-	client := &http.Client{Timeout: 8 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("v2rayA API switch: %w", err)
-	}
-	defer resp.Body.Close()
-	responseBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	var envelope map[string]any
-	if err := json.Unmarshal(responseBody, &envelope); err != nil {
-		return fmt.Errorf("v2rayA API switch returned invalid JSON: HTTP %d", resp.StatusCode)
-	}
-	code := fmt.Sprint(envelope["code"])
-	if resp.StatusCode >= 400 || code != "SUCCESS" {
-		return fmt.Errorf("v2rayA API switch failed: HTTP %d code=%s error=%v message=%v",
-			resp.StatusCode, code, envelope["errorCode"], envelope["message"])
+	if _, err := v2rayautil.CallAPI("vpn-guardian-control", http.MethodPut, "outboundConnections", body, 8*time.Second); err != nil {
+		return fmt.Errorf("switch v2rayA node: %w", err)
 	}
 	if err := waitReady(6 * time.Second); err != nil {
 		return err
@@ -1286,7 +1188,7 @@ func run() error {
 
 	// State lives in /tmp and is lost on reboot. Reconstruct fail-open state
 	// from v2rayA itself so a reboot while transparent=close cannot leave
-	// the router permanently bypassing LIBERTY.
+	// the router permanently bypassing VPN backend.
 	if db, err := openDB(); err == nil {
 		if mode, modeErr := transparent(db); modeErr == nil {
 			if mode == "close" && !s.FallbackDirect {
@@ -1339,7 +1241,7 @@ func run() error {
 			hardKillSwitchOff()
 		}
 		if s.FallbackDirect {
-			note("LIBERTY recovered; restoring transparent mode %s", s.DesiredTransparent)
+			note("VPN backend recovered; restoring transparent mode %s", s.DesiredTransparent)
 			if err := changeTransparent(s.DesiredTransparent); err != nil {
 				return err
 			}
@@ -1432,7 +1334,7 @@ func run() error {
 				hardKillSwitchOff()
 			}
 			if s.FallbackDirect {
-				note("working LIBERTY node found during fail-open; restoring transparent mode %s", s.DesiredTransparent)
+				note("working VPN backend node found during fail-open; restoring transparent mode %s", s.DesiredTransparent)
 				if err := changeTransparent(s.DesiredTransparent); err != nil {
 					return err
 				}
@@ -1478,10 +1380,10 @@ func run() error {
 			// goes only to the unavailable proxy outbound and therefore stays blocked.
 			if hostPathReady() {
 				hardKillSwitchOff()
-				note("no LIBERTY node healthy; selective kill switch remains active")
+				note("no VPN backend node healthy; selective kill switch remains active")
 			} else {
 				_ = hardKillSwitchOn()
-				note("no LIBERTY node healthy and TPROXY unavailable; hard kill switch remains active")
+				note("no VPN backend node healthy and TPROXY unavailable; hard kill switch remains active")
 			}
 			s.FallbackDirect = false
 		} else {
@@ -1491,7 +1393,7 @@ func run() error {
 				}
 				db.Close()
 			}
-			note("no LIBERTY node healthy; fail-open to direct internet")
+			note("no VPN backend node healthy; fail-open to direct internet")
 			if err := changeTransparent("close"); err != nil {
 				return err
 			}
@@ -1604,9 +1506,9 @@ type FrontSnapshot struct {
 func Snapshot(includeSecrets bool) (FrontSnapshot, error) {
 	var out FrontSnapshot
 	out.Control = loadControl()
-	out.FrontEnabled = fileExists("/etc/vpn-front-enabled")
+	out.FrontEnabled = fileExists(paths.FrontEnabled)
 	out.HardKillSwitch = false
-	out.PolicyMode = strings.TrimSpace(readSmallFile("/etc/vpn-policy-mode"))
+	out.PolicyMode = strings.TrimSpace(readSmallFile(paths.PolicyMode))
 
 	db, err := openDB()
 	if err != nil {
@@ -1678,7 +1580,7 @@ func Snapshot(includeSecrets bool) (FrontSnapshot, error) {
 	return out, nil
 }
 
-const frontControlLockPath = "/tmp/vpn-guardian-control.lock"
+const frontControlLockPath = paths.ControlLock
 
 func withFrontControlLock(fn func() error) error {
 	f, err := os.OpenFile(frontControlLockPath, os.O_CREATE|os.O_RDWR, 0600)

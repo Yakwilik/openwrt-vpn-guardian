@@ -1,0 +1,40 @@
+package paths
+
+const (
+	ConfigDir       = "/etc/vpn-guardian"
+	StackConfig     = ConfigDir + "/stack.json"
+	RoutingConfig   = ConfigDir + "/routing.json"
+	ControlConfig   = ConfigDir + "/control.json"
+	AuthConfig      = ConfigDir + "/auth.json"
+	BackupDir       = ConfigDir + "/backups"
+	BootstrapMarker = ConfigDir + "/bootstrap-complete"
+
+	GeneratedDir   = ConfigDir + "/generated"
+	FrontConfig    = GeneratedDir + "/front.json"
+	PolicyConfig   = GeneratedDir + "/policy.json"
+	PolicyFailOpen = GeneratedDir + "/policy-failopen.json"
+	PolicyVPNOnly  = GeneratedDir + "/policy-killswitch.json"
+	PolicyBlocked  = GeneratedDir + "/policy-killswitch-blocked.json"
+	PolicyDirect   = GeneratedDir + "/policy-direct.json"
+	FrontNFT       = GeneratedDir + "/front.nft"
+	FrontEnabled   = ConfigDir + "/front-enabled"
+	PolicyMode     = ConfigDir + "/policy-mode"
+	PolicyRuntime  = ConfigDir + "/policy-runtime"
+
+	StatusCache   = "/tmp/vpn-guardian-status.json"
+	History       = "/tmp/vpn-guardian-history.tsv"
+	Events        = "/tmp/vpn-guardian-events.tsv"
+	SessionsDir   = "/tmp/vpn-guardian-sessions"
+	WatchdogState = "/tmp/vpn-guardian-watchdog-state.json"
+	ControlState  = "/tmp/vpn-guardian-control-state.json"
+	ControlLock   = "/tmp/vpn-guardian-control.lock"
+	RepairAttempt = "/tmp/vpn-guardian-backend-repair-attempt"
+	SelftestLock  = "/tmp/vpn-guardian-selftest.lock"
+
+	FrontServiceInit     = "/etc/init.d/vpn-front"
+	PolicyServiceInit    = "/etc/init.d/vpn-policy"
+	FrontRoutingInit     = "/etc/init.d/vpn-front-routing"
+	WatchdogServiceInit  = "/etc/init.d/vpn-backend-watchdog"
+	CollectorServiceInit = "/etc/init.d/vpn-dashboard-collector"
+	APIServiceInit       = "/etc/init.d/vpn-guardian-api"
+)

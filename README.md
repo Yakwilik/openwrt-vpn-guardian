@@ -54,7 +54,7 @@ opkg install vpn-guardian_*.ipk
 The post-install bootstrap automatically:
 
 1. Detects the LAN interface, LAN CIDR/address and WAN interface.
-2. Creates router-specific manifests under /etc/vpn-stack.
+2. Creates router-specific manifests under /etc/vpn-guardian.
 3. Validates generated Xray and nftables configuration.
 4. Enables v2rayA and switches it to backend-only mode.
 5. Starts the embedded dashboard/API server.
@@ -130,9 +130,9 @@ vpn-guardian api-server [-listen 0.0.0.0:20175]
 Runtime manifests:
 
 ~~~text
-/etc/vpn-stack/stack.json
-/etc/vpn-stack/routing.json
-/etc/vpn-stack/control.json
+/etc/vpn-guardian/stack.json
+/etc/vpn-guardian/routing.json
+/etc/vpn-guardian/control.json
 ~~~
 
 The first two are generated from the router during bootstrap instead of shipping router-specific interface names or IP addresses.
@@ -169,7 +169,7 @@ aarch64_cortex-a53
 GL.iNet GL-MT6000
 ~~~
 
-The OpenWrt package workflow builds the IPK from the exact Git commit using the matching official OpenWrt SDK and verifies that the packaged binary is statically linked with no dynamic dependencies.
+The OpenWrt SDK/IPK workflow is intentionally disabled during active development. CI currently runs tests, vet and CGO-free static cross-builds only. The package workflow will be re-enabled for the release phase, where it must build the exact Git commit with the matching official OpenWrt SDK and verify that the packaged binary has no dynamic dependencies.
 
 ## Safety model
 

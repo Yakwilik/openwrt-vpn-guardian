@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
@@ -19,28 +20,41 @@ func main() {
 		os.Exit(2)
 	}
 
-	switch args[0] {
+	if err := run(args); err != nil {
+		fmt.Fprintln(os.Stderr, "vpn-guardian:", err)
+		os.Exit(1)
+	}
+}
+
+func run(args []string) error {
+	if len(args) == 0 {
+		return errors.New("command required")
+	}
+
+	command := args[0]
+	commandArgs := args[1:]
+
+	switch command {
 	case "watchdog":
-		watchdog.Run(args[1:])
+		watchdog.Run(commandArgs)
+		return nil
 	case "stack":
-		stack.Run(args[1:])
+		return stack.Run(commandArgs)
 	case "selftest":
-		selftest.Run(args[1:])
+		selftest.Run(commandArgs)
+		return nil
 	case "control":
-		control.Run(args[1:])
+		control.Run(commandArgs)
+		return nil
 	case "collector":
-		collector.Run(args[1:])
+		collector.Run(commandArgs)
+		return nil
 	case "api-server":
-		if err := api.Serve(args[1:]); err != nil {
-			fmt.Fprintln(os.Stderr, "vpn-guardian api-server:", err)
-			os.Exit(1)
-		}
+		return api.Serve(commandArgs)
 	case "bootstrap", "init", "status", "validate", "apply", "backup", "restore", "cleanup":
-		stack.Run(args)
+		return stack.Run(args)
 	default:
-		fmt.Fprintf(os.Stderr, "unknown command %q\n", args[0])
-		usage()
-		os.Exit(2)
+		return fmt.Errorf("unknown command %q", command)
 	}
 }
 
