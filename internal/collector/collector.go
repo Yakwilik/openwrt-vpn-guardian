@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/Yakwilik/openwrt-vpn-guardian/internal/config"
+	"github.com/Yakwilik/openwrt-vpn-guardian/internal/netstate"
 	"github.com/Yakwilik/openwrt-vpn-guardian/internal/paths"
 	v2rayautil "github.com/Yakwilik/openwrt-vpn-guardian/internal/v2raya"
 
@@ -384,7 +385,7 @@ func inspectTProxy(stack config.Stack) TProxyStatus {
 		Policy:       commandContains("ip", []string{"rule", "show"}, fmt.Sprintf("lookup %d", stack.Front.RouteTable)),
 		Route:        commandContains("ip", []string{"route", "show", "table", fmt.Sprint(stack.Front.RouteTable)}, "local default dev lo"),
 		BackendSOCKS: portReady(fmt.Sprintf("127.0.0.1:%d", stack.Backend.SocksPort)),
-		FrontPort:    portReady(fmt.Sprintf("127.0.0.1:%d", stack.Front.TProxyPort)),
+		FrontPort:    netstate.PortListening(stack.Front.TProxyPort),
 		RouteTable:   stack.Front.RouteTable,
 	}
 }
