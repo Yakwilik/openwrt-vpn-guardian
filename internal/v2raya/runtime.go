@@ -215,34 +215,60 @@ func RepairBackendListener(force bool) (bool, error) {
 		return true, nil
 	}
 
-	// Give a freshly started manager a brief chance to spawn the core before
-	// deciding that the manager itself is stuck.
-	graceDeadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(graceDeadline) {
-		if BackendSOCKSReady() {
-			return true, nil
-		}
-		time.Sleep(250 * time.Millisecond)
+	// Give a freshly prepared manager a brief chance to spawn the core by
+	// itself. In practice, v2rayA may keep the manager alive while the core is
+	// stopped, so this grace period is intentionally short.
+	if waitBackendSOCKS(3 * time.Second) {
+		return true, nil
 	}
-	state, _ = InspectRuntime()
 
-	// A selected backend with no SOCKS listener is unusable regardless of
-	// whether v2raya_core still has a PID. The core may have exited, or it may
-	// be stuck in a state where the process survives but its listener does not.
-	// Restart the manager once after the grace window; the outer cooldown keeps
-	// this from turning backend failures into a restart loop.
+	// This is the same action as the "Start" button in the v2rayA UI.
+	// Starting the manager service is not enough when the manager is already
+	// alive and the core has stopped.
+	apiErr := startCoreViaAPI()
+	if apiErr == nil && waitBackendSOCKS(8*time.Second) {
+		return true, nil
+	}
+
+	// If the manager/API itself is stuck, restart only the manager and retry
+	// the explicit core start once. Do not rely on system:running being true
+	// after restart; POST /api/v2ray is the operation that establishes that
+	// state and launches the core.
 	if err := service("restart"); err != nil {
-		return false, err
-	}
-
-	deadline := time.Now().Add(8 * time.Second)
-	for time.Now().Before(deadline) {
-		if BackendSOCKSReady() {
-			return true, nil
+		if apiErr != nil {
+			return false, fmt.Errorf("start core via API: %v; restart v2rayA: %w", apiErr, err)
 		}
-		time.Sleep(250 * time.Millisecond)
+		return false, fmt.Errorf("restart v2rayA after core start timeout: %w", err)
+	}
+	if err := waitDatabase(managerReadyWindow); err != nil {
+		return false, fmt.Errorf("wait for v2rayA after restart: %w", err)
+	}
+	if err := startCoreViaAPI(); err != nil {
+		if apiErr != nil {
+			return false, fmt.Errorf("start core before restart: %v; after restart: %w", apiErr, err)
+		}
+		return false, fmt.Errorf("start core after v2rayA restart: %w", err)
+	}
+	if waitBackendSOCKS(8 * time.Second) {
+		return true, nil
 	}
 	return false, nil
+}
+
+func startCoreViaAPI() error {
+	_, err := CallAPI("vpn-guardian-repair", http.MethodPost, "v2ray", nil, 10*time.Second)
+	return err
+}
+
+func waitBackendSOCKS(timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if BackendSOCKSReady() {
+			return true
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	return BackendSOCKSReady()
 }
 
 func setBackendOnly(db *sql.DB) error {
