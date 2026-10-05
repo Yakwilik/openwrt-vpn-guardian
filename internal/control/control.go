@@ -1479,12 +1479,40 @@ type NodeInfo struct {
 // SubscriptionInfo is the dashboard representation of a v2rayA subscription.
 type SubscriptionInfo struct {
 	ID         int    `json:"id"`
+	Name       string `json:"name"`
 	Address    string `json:"address"`
 	Host       string `json:"host"`
 	Info       string `json:"info"`
 	Remarks    string `json:"remarks"`
 	AutoSelect bool   `json:"autoSelect"`
 	NodeCount  int    `json:"nodeCount"`
+}
+
+func subscriptionInfoFromMap(sm map[string]any, includeSecrets bool) SubscriptionInfo {
+	sub := SubscriptionInfo{
+		ID:         intValue(sm["id"]),
+		Host:       strings.TrimSpace(str(sm, "host")),
+		Info:       strings.TrimSpace(str(sm, "info")),
+		Remarks:    strings.TrimSpace(str(sm, "remarks")),
+		AutoSelect: boolValue(sm["autoSelect"]),
+	}
+
+	if includeSecrets {
+		sub.Address = strings.TrimSpace(str(sm, "address"))
+	}
+	if servers, ok := sm["servers"].([]any); ok {
+		sub.NodeCount = len(servers)
+	}
+
+	switch {
+	case sub.Remarks != "":
+		sub.Name = sub.Remarks
+	case sub.Host != "":
+		sub.Name = sub.Host
+	default:
+		sub.Name = fmt.Sprintf("Subscription #%d", sub.ID)
+	}
+	return sub
 }
 
 type ActiveNode struct {
@@ -1532,25 +1560,15 @@ func Snapshot(includeSecrets bool) (FrontSnapshot, error) {
 					if !ok {
 						continue
 					}
-					sub := SubscriptionInfo{
-						ID:         intValue(sm["id"]),
-						Host:       fmt.Sprint(sm["host"]),
-						Info:       fmt.Sprint(sm["info"]),
-						Remarks:    fmt.Sprint(sm["remarks"]),
-						AutoSelect: boolValue(sm["autoSelect"]),
-					}
-					if includeSecrets {
-						sub.Address = fmt.Sprint(sm["address"])
-					}
+					sub := subscriptionInfoFromMap(sm, includeSecrets)
 					if servers, ok := sm["servers"].([]any); ok {
-						sub.NodeCount = len(servers)
 						for _, rawServer := range servers {
 							vm, ok := rawServer.(map[string]any)
 							if !ok {
 								continue
 							}
 							id := intValue(vm["id"])
-							ping[fmt.Sprintf("%d:%d", si, id)] = fmt.Sprint(vm["pingLatency"])
+							ping[fmt.Sprintf("%d:%d", si, id)] = str(vm, "pingLatency")
 						}
 					}
 					out.Subscriptions = append(out.Subscriptions, sub)
