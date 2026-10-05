@@ -38,3 +38,58 @@ func TestBackendUnavailableHealth(t *testing.T) {
 		}
 	}
 }
+
+func TestClassifyFrontRecovery(t *testing.T) {
+	tests := []struct {
+		name           string
+		enabled        bool
+		listening      bool
+		routingReady   bool
+		routingPresent bool
+		want           frontRecoveryAction
+	}{
+		{
+			name: "disabled and clean",
+			want: frontRecoveryNone,
+		},
+		{
+			name:           "disabled with stale routing",
+			routingPresent: true,
+			want:           frontRecoveryDisableInterception,
+		},
+		{
+			name:         "healthy",
+			enabled:      true,
+			listening:    true,
+			routingReady: true,
+			want:         frontRecoveryNone,
+		},
+		{
+			name:      "listener healthy routing missing",
+			enabled:   true,
+			listening: true,
+			want:      frontRecoveryEnableInterception,
+		},
+		{
+			name:           "listener missing routing active",
+			enabled:        true,
+			routingReady:   true,
+			routingPresent: true,
+			want:           frontRecoveryRestartFront,
+		},
+		{
+			name:    "listener missing routing already disabled",
+			enabled: true,
+			want:    frontRecoveryRestartFront,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := classifyFrontRecovery(tt.enabled, tt.listening, tt.routingReady, tt.routingPresent)
+			if got != tt.want {
+				t.Fatalf("action = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

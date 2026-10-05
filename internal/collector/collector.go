@@ -385,7 +385,7 @@ func inspectTProxy(stack config.Stack) TProxyStatus {
 		Policy:       commandContains("ip", []string{"rule", "show"}, fmt.Sprintf("lookup %d", stack.Front.RouteTable)),
 		Route:        commandContains("ip", []string{"route", "show", "table", fmt.Sprint(stack.Front.RouteTable)}, "local default dev lo"),
 		BackendSOCKS: portReady(fmt.Sprintf("127.0.0.1:%d", stack.Backend.SocksPort)),
-		FrontPort:    netstate.PortListening(stack.Front.TProxyPort),
+		FrontPort:    netstate.TCPListening(stack.Front.TProxyPort),
 		RouteTable:   stack.Front.RouteTable,
 	}
 }
