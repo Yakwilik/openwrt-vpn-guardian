@@ -1,188 +1,95 @@
 # OpenWrt VPN Guardian
 
-OpenWrt VPN Guardian is a selective VPN control plane for OpenWrt with v2rayA as the VPN backend.
+Selective IPv4 VPN routing for OpenWrt. Send chosen domains and IP ranges through v2rayA, automatically switch unhealthy VPN nodes, and manage connections from a local dashboard. Ordinary traffic stays direct when the VPN backend fails.
 
-Its main invariant is that ordinary direct traffic does not depend on VPN health. Only traffic matched by the selective routing rules enters the VPN path.
+**Development status:** install from source. The OpenWrt IPK workflow is disabled until release.
 
-## Architecture
+## Install on GL-MT6000
 
-~~~text
-LAN
- |
-vpn-front (Xray TPROXY)
- |-- direct class ----------------------> WAN
- |
- '-- proxy class
-       |
-       v
-    vpn-policy
-       |
-       v
-    v2rayA SOCKS 127.0.0.1:20173
-       |
-       v
-    selected VPN node
-~~~
+Tested with OpenWrt 24.10.4 and v2rayA 2.5.8. Guardian requires the SQLite-based v2rayA database format.
 
-v2rayA runs in backend-only mode with its own transparent proxy disabled.
+You need Go 1.23+, Git and Make on your computer, plus root SSH access to the router. Run the commands below in the same terminal on your computer. Change the router address if needed.
 
-The single *vpn-guardian* Go binary provides stack management, watchdog, collector, self-test, dashboard UI and dashboard API. Xray remains the packet-routing engine and v2rayA remains the VPN backend.
-
-## Features
-
-- Stable Xray front router with TPROXY.
-- Selective routing by geosite domains and explicit IP ranges.
-- Direct traffic remains available when the VPN backend is unhealthy.
-- VPN-only and fail-open policies for the proxy class.
-- Automatic failover across multiple v2rayA subscriptions.
-- VLESS TCP + Reality, VLESS XHTTP + Reality, VLESS WS + TLS, Hysteria2 and Shadowsocks candidates.
-- Node scoring, EWMA latency and exponential cooldown.
-- Pinned-node and automatic selection modes.
-- Four independent backend health probes with healthy/degraded/down states.
-- Embedded dashboard with status, history, events, nodes and subscriptions.
-- Declarative manifests with validation, backup and rollback.
-- Automatic first-run bootstrap.
-
-## Installation
-
-The package is intended to require only:
+### 1. Build
 
 ~~~sh
-opkg install vpn-guardian_*.ipk
+git clone https://github.com/Yakwilik/openwrt-vpn-guardian.git
+cd openwrt-vpn-guardian
+make linux-arm64
 ~~~
 
-The post-install bootstrap automatically:
+This produces a static Linux/ARM64 binary with *CGO_ENABLED=0*.
 
-1. Detects the LAN interface, LAN CIDR/address and WAN interface.
-2. Creates router-specific manifests under /etc/vpn-guardian.
-3. Validates generated Xray and nftables configuration.
-4. Enables v2rayA and switches it to backend-only mode.
-5. Starts the embedded dashboard/API server.
-6. Adds vpn.home.arpa to dnsmasq when dnsmasq is present.
-7. Integrates with an existing nginx installation when nginx is present.
-8. Generates the Xray front/policy, TPROXY routing, watchdog and collector configuration.
-9. Creates a pre-apply backup.
-10. Activates the stack, runs the self-test and enables boot services only after validation succeeds.
+### 2. Install router dependencies
 
-If v2rayA has no usable VPN node yet, bootstrap deliberately leaves the front inactive. The dashboard remains available so a subscription can be configured, and the bootstrap service retries automatically.
-
-A read-only preflight is available:
+Use package feeds matching your router firmware.
 
 ~~~sh
-vpn-guardian bootstrap --dry-run
+ROUTER=root@192.168.8.1
+ssh "$ROUTER" '
+  opkg update &&
+  opkg install v2raya xray-core v2ray-geosite ca-bundle \
+    ip-full nftables-json kmod-nft-tproxy
+'
+~~~
+
+### 3. Copy the binary and service files
+
+~~~sh
+scp -O dist/vpn-guardian-linux-arm64 "$ROUTER:/usr/bin/vpn-guardian.new"
+COPYFILE_DISABLE=1 tar -C package/openwrt/files -cf - etc |
+  ssh "$ROUTER" 'tar -C / -xf -'
+ssh "$ROUTER" '
+  set -e
+  chmod 755 /usr/bin/vpn-guardian.new \
+    /etc/init.d/vpn-guardian-api \
+    /etc/init.d/vpn-guardian-bootstrap \
+    /etc/hotplug.d/iface/99-vpn-front-routing
+  mv -f /usr/bin/vpn-guardian.new /usr/bin/vpn-guardian
+  /etc/init.d/vpn-guardian-bootstrap enable
+  /etc/init.d/vpn-guardian-bootstrap start
+'
+~~~
+
+Bootstrap detects the network, creates configuration, prepares v2rayA and starts the dashboard. Once a VPN node works, it activates routing, runs the self-test and enables services at boot.
+
+### 4. Connect a VPN node and check the result
+
+Open [v2rayA](http://192.168.8.1:2017/). On first use, create an account, import a subscription, select a node and click **Start**. Guardian configures v2rayA for backend-only operation; leave its transparent proxy disabled.
+
+Until the VPN backend is usable, bootstrap keeps ordinary routing active and retries every 15 seconds.
+
+~~~sh
+ssh "$ROUTER" 'tail -n 30 /tmp/vpn-guardian-bootstrap.log'
+~~~
+
+Wait for *bootstrap OK*, then verify:
+
+~~~sh
+ssh "$ROUTER" 'vpn-guardian status && vpn-guardian selftest'
 ~~~
 
 ## Dashboard
 
-The dashboard is embedded into the Go binary.
+Open [http://192.168.8.1:20175/](http://192.168.8.1:20175/) from the router's LAN. Use **Режим управления** to manage nodes and subscriptions and set a management PIN.
 
-Without any external web server it is available directly on the router LAN:
+With nginx already installed, the supplied virtual host also serves [http://vpn.home.arpa/](http://vpn.home.arpa/). nginx is optional. Use HTTP: HTTPS may open the stock GL.iNet admin page.
 
-~~~text
-http://<router-lan-ip>:20175/
+VPN-only is the default: backend failure blocks only VPN traffic. If the shared front itself fails, interception stays enabled until automatic recovery. See the [architecture](docs/architecture.md) for details.
+
+## Routing configuration
+
+Bootstrap creates these files on the router:
+
+| File | Purpose |
+|---|---|
+| */etc/vpn-guardian/routing.json* | Domains and IP ranges to route through VPN |
+| */etc/vpn-guardian/stack.json* | Interfaces, ports and routing settings |
+
+Edit the manifests, then validate and apply:
+
+~~~sh
+ssh "$ROUTER" 'vpn-guardian validate && vpn-guardian apply'
 ~~~
 
-When nginx is already installed, the package adds a small reverse-proxy virtual host and the same dashboard is available as:
-
-~~~text
-http://vpn.home.arpa/
-~~~
-
-nginx is optional and is not an OpenWrt package dependency.
-
-## Runtime dependencies
-
-The OpenWrt package depends only on components that are not reasonably replaced by a small amount of application code:
-
-- *v2raya* — VPN backend and subscription/node management.
-- *xray-core* — front and policy proxy engine.
-- *v2ray-geosite* — geosite datasets used by selective routing.
-- *ca-bundle* — CA roots for HTTPS health checks.
-- *ip-full* — policy routing operations required by TPROXY.
-- *nftables-json* — nftables userspace CLI used to validate and apply the front ruleset.
-- *kmod-nft-tproxy* — kernel TPROXY support; it pulls its nftables/core dependencies.
-
-Not required:
-
-- nginx — optional integration only.
-- fcgiwrap/CGI — the dashboard API is native Go HTTP.
-- v2ray-geoip — no geoip rules are used.
-- kmod-nft-socket — the generated front rules do not use the nft socket expression.
-
-## Commands
-
-~~~text
-vpn-guardian bootstrap [--dry-run]
-vpn-guardian status
-vpn-guardian validate
-vpn-guardian apply
-vpn-guardian backup
-vpn-guardian restore <archive>
-vpn-guardian selftest
-vpn-guardian watchdog [flags]
-vpn-guardian collector -mode collect -interval 3s
-vpn-guardian control [flags]
-vpn-guardian api-server [-listen 0.0.0.0:20175]
-~~~
-
-## Configuration
-
-Runtime manifests:
-
-~~~text
-/etc/vpn-guardian/stack.json
-/etc/vpn-guardian/routing.json
-/etc/vpn-guardian/control.json
-~~~
-
-The first two are generated from the router during bootstrap instead of shipping router-specific interface names or IP addresses.
-
-Generic examples live under *configs/* and are also included in the package under */usr/share/vpn-guardian/examples/*.
-
-## Build model
-
-The binary is pure Go and OpenWrt builds it with:
-
-~~~text
-CGO_ENABLED=0
-internal Go linker
-target GOOS/GOARCH supplied by the OpenWrt SDK
-~~~
-
-CI additionally cross-builds static Linux binaries for:
-
-- 386
-- amd64
-- arm
-- arm64
-- loong64
-- riscv64
-
-MIPS and MIPS64 are deliberately excluded because the current pure-Go SQLite dependency does not support those targets in this configuration.
-
-The reference package target is:
-
-~~~text
-OpenWrt 24.10.4
-mediatek/filogic
-aarch64_cortex-a53
-GL.iNet GL-MT6000
-~~~
-
-The OpenWrt SDK/IPK workflow is intentionally disabled during active development. CI currently runs tests, vet and CGO-free static cross-builds only. The package workflow will be re-enabled for the release phase, where it must build the exact Git commit with the matching official OpenWrt SDK and verify that the packaged binary has no dynamic dependencies.
-
-## Safety model
-
-Direct traffic must continue to work when v2rayA is restarting, unhealthy or unavailable.
-
-When the VPN backend fails in VPN-only mode, the proxy class fails closed while direct traffic continues through the front. If the shared front itself fails, interception is retained until automatic recovery; it must not be bypassed silently. Local management remains outside interception.
-
-Every apply creates a backup before replacing runtime configuration. A failed restart, self-test or service-enable step rolls back both files and runtime state. On a clean first install, rollback removes generated TPROXY state and restores ordinary routing.
-
-## Development status
-
-The unified binary, embedded dashboard/API, backend-only v2rayA bootstrap, collector, watchdog, self-test and OpenWrt package recipe are implemented.
-
-Before the first tagged release the package must pass the SDK build, controlled install, reboot, upgrade and rollback checklist on the reference GL-MT6000.
-
-See *docs/architecture.md* and *docs/release-checklist.md*.
+Apply creates a backup and rolls back on failure. [Configuration examples](configs/) · [Router validation](docs/validation/) · [Release checklist](docs/release-checklist.md)
