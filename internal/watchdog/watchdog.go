@@ -93,15 +93,58 @@ type HealthResult struct {
 }
 
 type healthTarget struct {
-	Name string
-	URL  string
+	Name           string
+	URL            string
+	Required       bool
+	ExpectedStatus []int
+}
+
+func (t healthTarget) accepts(code int) bool {
+	for _, expected := range t.ExpectedStatus {
+		if code == expected {
+			return true
+		}
+	}
+	return false
+}
+
+func healthTargetByName(name string) (healthTarget, bool) {
+	for _, target := range healthTargets {
+		if target.Name == name {
+			return target, true
+		}
+	}
+	return healthTarget{}, false
+}
+
+func probeAccepted(result ProbeResult) bool {
+	target, ok := healthTargetByName(result.Name)
+	return ok && target.accepts(result.Code)
 }
 
 var healthTargets = []healthTarget{
-	{Name: "google", URL: "https://connectivitycheck.gstatic.com/generate_204"},
-	{Name: "cloudflare", URL: "https://cp.cloudflare.com/generate_204"},
-	{Name: "apple", URL: "https://captive.apple.com/hotspot-detect.html"},
-	{Name: "firefox", URL: "https://detectportal.firefox.com/canonical.html"},
+	{
+		Name:           "google",
+		URL:            "https://connectivitycheck.gstatic.com/generate_204",
+		ExpectedStatus: []int{http.StatusNoContent},
+	},
+	{
+		Name:           "cloudflare",
+		URL:            "https://cp.cloudflare.com/generate_204",
+		ExpectedStatus: []int{http.StatusNoContent},
+	},
+	{
+		Name:           "telegram",
+		URL:            "https://api.telegram.org/",
+		Required:       true,
+		ExpectedStatus: []int{http.StatusOK},
+	},
+	{
+		Name:           "openai",
+		URL:            "https://api.openai.com/v1/models",
+		Required:       true,
+		ExpectedStatus: []int{http.StatusUnauthorized},
+	},
 }
 
 func main() {
@@ -252,7 +295,7 @@ func averageLatency(h HealthResult) float64 {
 	var sum int64
 	n := 0
 	for _, p := range h.Results {
-		if p.Code > 0 && p.Code < 500 {
+		if probeAccepted(p) {
 			sum += p.MS
 			n++
 		}
@@ -538,29 +581,44 @@ func health(timeout time.Duration) HealthResult {
 		}()
 	}
 	wg.Wait()
-	for _, p := range result.Results {
-		if p.Code > 0 && p.Code < 500 {
+	classifyHealth(&result)
+	return result
+}
+
+func classifyHealth(result *HealthResult) {
+	result.Passed = 0
+	requiredOK := true
+	for _, probe := range result.Results {
+		accepted := probeAccepted(probe)
+		if accepted {
 			result.Passed++
 		}
+		target, ok := healthTargetByName(probe.Name)
+		if ok && target.Required && !accepted {
+			requiredOK = false
+		}
 	}
+
 	switch {
+	case !requiredOK:
+		result.Status = "down"
+		result.Healthy = false
 	case result.Passed >= 3:
 		result.Status = "healthy"
 		result.Healthy = true
 	case result.Passed == 2:
 		result.Status = "degraded"
-		result.Healthy = true
+		result.Healthy = false
 	default:
 		result.Status = "down"
 		result.Healthy = false
 	}
-	return result
 }
 
 func healthSummary(h HealthResult) string {
 	parts := []string{fmt.Sprintf("status=%s passed=%d/%d", h.Status, h.Passed, h.Total)}
 	for _, p := range h.Results {
-		if p.Code > 0 && p.Code < 500 {
+		if probeAccepted(p) {
 			parts = append(parts, fmt.Sprintf("%s=%d/%dms", p.Name, p.Code, p.MS))
 			continue
 		}

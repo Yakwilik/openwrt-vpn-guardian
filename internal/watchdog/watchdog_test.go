@@ -176,3 +176,119 @@ func TestAllowedActiveCandidatePreservesHealth(t *testing.T) {
 		t.Fatalf("allowed active candidate health = %+v, want %+v", got, want)
 	}
 }
+
+func TestApplicationProbesAreRequired(t *testing.T) {
+	tests := []struct {
+		name  string
+		codes map[string]int
+		want  string
+	}{
+		{
+			name: "all probes pass",
+			codes: map[string]int{
+				"google":     204,
+				"cloudflare": 204,
+				"telegram":   200,
+				"openai":     401,
+			},
+			want: "healthy",
+		},
+		{
+			name: "openai forbidden rejects otherwise healthy node",
+			codes: map[string]int{
+				"google":     204,
+				"cloudflare": 204,
+				"telegram":   200,
+				"openai":     403,
+			},
+			want: "down",
+		},
+		{
+			name: "telegram unavailable rejects otherwise healthy node",
+			codes: map[string]int{
+				"google":     204,
+				"cloudflare": 204,
+				"telegram":   503,
+				"openai":     401,
+			},
+			want: "down",
+		},
+		{
+			name: "one generic probe may fail",
+			codes: map[string]int{
+				"google":     0,
+				"cloudflare": 204,
+				"telegram":   200,
+				"openai":     401,
+			},
+			want: "healthy",
+		},
+		{
+			name: "both generic probes failing is not switch-safe",
+			codes: map[string]int{
+				"google":     0,
+				"cloudflare": 0,
+				"telegram":   200,
+				"openai":     401,
+			},
+			want: "degraded",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := healthResultWithCodes(tt.codes)
+			if result.Status != tt.want {
+				t.Fatalf("status = %q, want %q: %+v", result.Status, tt.want, result)
+			}
+			if got := result.Healthy; got != (tt.want == "healthy") {
+				t.Fatalf("healthy = %v for status %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestOpenAIProbeRequiresUnauthorizedNotForbidden(t *testing.T) {
+	target, ok := healthTargetByName("openai")
+	if !ok {
+		t.Fatal("openai health target missing")
+	}
+	if !target.Required {
+		t.Fatal("openai health target must be required")
+	}
+	if !target.accepts(401) {
+		t.Fatal("openai 401 must prove that the API is reachable from this egress")
+	}
+	if target.accepts(403) {
+		t.Fatal("openai 403 must reject the node")
+	}
+}
+
+func TestTelegramProbeIsRequired(t *testing.T) {
+	target, ok := healthTargetByName("telegram")
+	if !ok {
+		t.Fatal("telegram health target missing")
+	}
+	if !target.Required {
+		t.Fatal("telegram health target must be required")
+	}
+	if !target.accepts(200) {
+		t.Fatal("telegram 200 must pass")
+	}
+}
+
+func healthResultWithCodes(codes map[string]int) HealthResult {
+	result := HealthResult{
+		Total:   len(healthTargets),
+		Results: make([]ProbeResult, 0, len(healthTargets)),
+	}
+	for _, target := range healthTargets {
+		result.Results = append(result.Results, ProbeResult{
+			Name: target.Name,
+			URL:  target.URL,
+			Code: codes[target.Name],
+		})
+	}
+	classifyHealth(&result)
+	return result
+}

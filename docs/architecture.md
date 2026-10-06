@@ -92,6 +92,8 @@ A selected node outside the allowlist cannot be declared healthy merely because 
 
 Selection combines the existing transport priority with EWMA latency, recent failures and exponential cooldown.
 
+Backend health is application-aware. Google and Cloudflare provide generic connectivity signals, while Telegram and OpenAI are required probes. The OpenAI probe deliberately calls the unauthenticated models endpoint: HTTP 401 proves that the API is reachable, while HTTP 403 rejects the node. A node is switch-safe only when both required probes pass and at least three of four total probes succeed.
+
 ## Collector
 
 The collector produces a cheap dashboard cache instead of making every UI refresh inspect v2rayA, nftables and external endpoints.
