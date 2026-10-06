@@ -7,7 +7,7 @@ interface ServicesPanelProps {
   canManage: boolean;
   busy?: string;
   onRepair: () => void;
-  onRestart: (service: "v2raya" | "xray" | "zapret2") => void;
+  onRestart: (service: "v2raya") => void;
 }
 
 export function ServicesPanel({
@@ -46,12 +46,6 @@ export function ServicesPanel({
         </button>
         <button className="button button-ghost" disabled={!canManage || Boolean(busy)} onClick={() => onRestart("v2raya")}>
           Restart v2rayA
-        </button>
-        <button className="button button-ghost" disabled={!canManage || Boolean(busy)} onClick={() => onRestart("xray")}>
-          Restart Xray
-        </button>
-        <button className="button button-ghost" disabled={!canManage || Boolean(busy)} onClick={() => onRestart("zapret2")}>
-          Restart zapret2
         </button>
       </div>
     </section>

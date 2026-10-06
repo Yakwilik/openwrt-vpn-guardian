@@ -1592,6 +1592,54 @@ func SetFailurePolicyFront(policy string) error {
 	})
 }
 
+func SetAllowedTransportsFront(transports []config.Transport) error {
+	selection := config.Selection{
+		AllowedTransports: append([]config.Transport(nil), transports...),
+	}
+	policy, err := v2rayautil.NewCandidatePolicy(selection)
+	if err != nil {
+		return err
+	}
+
+	return withFrontControlLock(func() error {
+		db, err := openDB()
+		if err != nil {
+			return err
+		}
+		candidates, err := v2rayautil.ListCandidates(context.Background(), db, policy)
+		db.Close()
+		if err != nil {
+			return err
+		}
+		if len(candidates) == 0 {
+			return errors.New("no VPN nodes match the selected transports")
+		}
+
+		stack, err := config.LoadStack()
+		if err != nil {
+			return err
+		}
+		previousSelection := stack.Selection
+		stack.Selection = selection
+		if err := config.SaveStack(stack); err != nil {
+			return err
+		}
+
+		ctrl := loadControl()
+		if ctrl.Mode != "pinned" || policy.Eligible(ctrl.PinProtocol, ctrl.PinNetwork, ctrl.PinSecurity) {
+			return nil
+		}
+
+		ctrl.Mode = "auto"
+		clearPin(&ctrl)
+		if err := saveControl(ctrl); err != nil {
+			stack.Selection = previousSelection
+			return errors.Join(err, config.SaveStack(stack))
+		}
+		return nil
+	})
+}
+
 func AddSubscription(address string) error {
 	if strings.TrimSpace(address) == "" {
 		return errors.New("subscription URL required")

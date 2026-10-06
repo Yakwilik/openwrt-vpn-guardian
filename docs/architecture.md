@@ -139,6 +139,8 @@ When nginx is already installed, vpn.home.arpa is added as an optional reverse p
 
 Control mutations require a management session and CSRF token. Initial management unlock is accepted only from the LAN CIDR declared in the stack manifest. X-Real-IP is trusted only when the immediate HTTP peer is loopback, which allows a local reverse proxy without allowing direct clients to spoof their source.
 
+The management UI exposes the transport allowlist from *selection.allowedTransports*. Updates are validated against the shared transport catalogue and the current v2rayA database before *stack.json* is replaced atomically. An empty allowlist or a selection with no eligible nodes is rejected. If the new allowlist excludes a pinned node, the pin is released and control returns to Auto before the watchdog immediately re-evaluates the active backend.
+
 ## Initialization and bootstrap
 
 Installing the OpenWrt package does not activate interception. Run *vpn-guardian init* in an interactive root terminal to configure the router. Both *init* and *bootstrap* use the same Go coordinator in *internal/setup*:

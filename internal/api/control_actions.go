@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/Yakwilik/openwrt-vpn-guardian/internal/control"
+	"github.com/Yakwilik/openwrt-vpn-guardian/internal/paths"
 	v2rayautil "github.com/Yakwilik/openwrt-vpn-guardian/internal/v2raya"
 )
 
@@ -61,6 +62,14 @@ func executeControlAction(req controlRequest) (string, error) {
 			}
 		}
 		return "", control.DeleteSubscription(req.ID)
+	case "selection":
+		if err := control.SetAllowedTransportsFront(req.Transports); err != nil {
+			return "", err
+		}
+		// Re-evaluate the active backend immediately. Failure to restart is not
+		// fatal: the existing daemon will pick up stack.json on its next pass.
+		_ = exec.Command(paths.WatchdogServiceInit, "restart").Run()
+		return "", nil
 	case "repair":
 		ready, err := v2rayautil.RepairBackendListener(true)
 		if err != nil {
@@ -86,12 +95,14 @@ func activeSubscriptionMatches(id int) bool {
 }
 
 func restartAllowedService(name string) error {
-	switch name {
-	case "v2raya", "xray", "zapret2":
-		return restartServiceAPI(name)
-	default:
+	if !restartServiceAllowed(name) {
 		return fmt.Errorf("service %q is not allowed", name)
 	}
+	return restartServiceAPI(name)
+}
+
+func restartServiceAllowed(name string) bool {
+	return name == "v2raya"
 }
 
 func restartServiceAPI(name string) error {

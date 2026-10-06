@@ -1,4 +1,5 @@
-import type { ControlResponse } from "../types";
+import { useEffect, useMemo, useState } from "react";
+import type { ControlResponse, SelectionState } from "../types";
 import { modeLabel, policyLabel } from "../utils";
 
 interface ControlPanelProps {
@@ -6,6 +7,7 @@ interface ControlPanelProps {
   busy?: string;
   onMode: (mode: "auto" | "direct") => void;
   onPolicy: (killswitch: boolean) => void;
+  onTransports: (transports: string[]) => Promise<void>;
   onManage: () => void;
   onSetPin: (pin: string) => Promise<void>;
 }
@@ -15,6 +17,7 @@ export function ControlPanel({
   busy,
   onMode,
   onPolicy,
+  onTransports,
   onManage,
   onSetPin,
 }: ControlPanelProps) {
@@ -27,7 +30,7 @@ export function ControlPanel({
       <div className="panel-heading">
         <div>
           <h2>Control plane</h2>
-          <p>Режим маршрутизации и поведение proxy-класса при отказе VPN.</p>
+          <p>Режим маршрутизации, transport allowlist и поведение при отказе VPN.</p>
         </div>
         <span className={`access-badge ${control?.authenticated ? "access-on" : ""}`}>
           {canManage ? "management" : control?.authenticated ? "setup" : "read-only"}
@@ -54,6 +57,13 @@ export function ControlPanel({
               : "Proxy-класс может временно перейти в direct."}
           </div>
         </ControlGroup>
+
+        <TransportSelector
+          selection={control?.selection}
+          canManage={canManage}
+          busy={Boolean(busy)}
+          onSave={onTransports}
+        />
       </div>
 
       <div className="control-footer">
@@ -69,6 +79,81 @@ export function ControlPanel({
 
       {control?.authenticated && !control.authConfigured && <PinSetup busy={Boolean(busy)} onSetPin={onSetPin} />}
     </section>
+  );
+}
+
+function TransportSelector({
+  selection,
+  canManage,
+  busy,
+  onSave,
+}: {
+  selection?: SelectionState;
+  canManage: boolean;
+  busy: boolean;
+  onSave: (transports: string[]) => Promise<void>;
+}) {
+  const allowed = selection?.allowedTransports ?? [];
+  const options = selection?.options ?? [];
+  const [selected, setSelected] = useState<string[]>(allowed);
+
+  useEffect(() => {
+    setSelected(allowed);
+  }, [allowed.join("|")]);
+
+  const dirty = useMemo(() => {
+    if (selected.length !== allowed.length) return true;
+    return selected.some((value) => !allowed.includes(value));
+  }, [allowed, selected]);
+
+  function toggle(value: string) {
+    if (!canManage || busy) return;
+    setSelected((current) =>
+      current.includes(value)
+        ? current.filter((item) => item !== value)
+        : [...current, value],
+    );
+  }
+
+  return (
+    <div className="control-group">
+      <div className="control-group-head">
+        <span>Разрешённые транспорты</span>
+        <strong>{allowed.length}/{options.length}</strong>
+      </div>
+      <div className="transport-options">
+        {options.map((option) => {
+          const active = selected.includes(option.value);
+          return (
+            <button
+              type="button"
+              className={`transport-toggle ${active ? "active" : ""}`}
+              disabled={!canManage || busy}
+              onClick={() => toggle(option.value)}
+              key={option.value}
+            >
+              <span className="transport-check">{active ? "✓" : ""}</span>
+              <span>{option.label}</span>
+            </button>
+          );
+        })}
+      </div>
+      <div className="transport-footer">
+        <div className="inline-note">
+          Watchdog использует только выбранные транспорты. Если отключить транспорт pinned-ноды, режим автоматически станет Auto.
+        </div>
+        {canManage && (
+          <button
+            type="button"
+            className="button button-quiet"
+            disabled={busy || !dirty || selected.length === 0}
+            onClick={() => void onSave(selected)}
+          >
+            {selected.length === 0 ? "Нужен хотя бы один" : "Сохранить"}
+          </button>
+        )}
+      </div>
+    </div>
   );
 }
 

@@ -131,6 +131,45 @@ func LoadStack() (Stack, error) {
 	return cfg, nil
 }
 
+func SaveStack(cfg Stack) error {
+	return saveStackFile(paths.StackConfig, cfg)
+}
+
+func saveStackFile(path string, cfg Stack) (err error) {
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return err
+	}
+	file, err := os.CreateTemp(filepath.Dir(path), ".vpn-guardian-stack-")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(file.Name())
+	defer file.Close()
+
+	if err := file.Chmod(0600); err != nil {
+		return err
+	}
+	if _, err := file.Write(data); err != nil {
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	return os.Rename(file.Name(), path)
+}
+
 func LoadFiles(stackPath, routingPath string) (Stack, Routing, error) {
 	var stack Stack
 	var routing Routing

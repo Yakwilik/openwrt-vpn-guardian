@@ -8,6 +8,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/Yakwilik/openwrt-vpn-guardian/internal/config"
 	"github.com/Yakwilik/openwrt-vpn-guardian/internal/control"
 	"github.com/Yakwilik/openwrt-vpn-guardian/internal/paths"
 )
@@ -32,16 +33,27 @@ type session struct {
 }
 
 type controlRequest struct {
-	Action     string `json:"action"`
-	PIN        string `json:"pin,omitempty"`
-	Enabled    bool   `json:"enabled,omitempty"`
-	ID         int    `json:"id,omitempty"`
-	Sub        int    `json:"sub,omitempty"`
-	URL        string `json:"url,omitempty"`
-	Remarks    string `json:"remarks,omitempty"`
-	AutoSelect bool   `json:"autoSelect,omitempty"`
-	Confirm    string `json:"confirm,omitempty"`
-	Service    string `json:"service,omitempty"`
+	Action     string             `json:"action"`
+	PIN        string             `json:"pin,omitempty"`
+	Enabled    bool               `json:"enabled,omitempty"`
+	ID         int                `json:"id,omitempty"`
+	Sub        int                `json:"sub,omitempty"`
+	URL        string             `json:"url,omitempty"`
+	Remarks    string             `json:"remarks,omitempty"`
+	AutoSelect bool               `json:"autoSelect,omitempty"`
+	Confirm    string             `json:"confirm,omitempty"`
+	Service    string             `json:"service,omitempty"`
+	Transports []config.Transport `json:"transports,omitempty"`
+}
+
+type transportOptionResponse struct {
+	Value config.Transport `json:"value"`
+	Label string           `json:"label"`
+}
+
+type selectionResponse struct {
+	AllowedTransports []config.Transport        `json:"allowedTransports"`
+	Options           []transportOptionResponse `json:"options"`
 }
 
 type controlResponse struct {
@@ -57,6 +69,7 @@ type controlResponse struct {
 	FrontEnabled   bool                       `json:"frontEnabled"`
 	HardKillSwitch bool                       `json:"hardKillSwitch"`
 	PolicyMode     string                     `json:"policyMode"`
+	Selection      selectionResponse          `json:"selection"`
 	Result         string                     `json:"result,omitempty"`
 	Message        string                     `json:"message,omitempty"`
 	Error          string                     `json:"error,omitempty"`
@@ -193,6 +206,12 @@ func makeControlResponse(authenticated, configured bool) (controlResponse, error
 	if err != nil {
 		return controlResponse{}, err
 	}
+	stack, err := config.LoadStack()
+	if err != nil {
+		return controlResponse{}, err
+	}
+	selection := makeSelectionResponse(stack)
+
 	mode := "setup"
 	if configured {
 		mode = "pin"
@@ -209,7 +228,22 @@ func makeControlResponse(authenticated, configured bool) (controlResponse, error
 		FrontEnabled:   snap.FrontEnabled,
 		HardKillSwitch: snap.HardKillSwitch,
 		PolicyMode:     snap.PolicyMode,
+		Selection:      selection,
 	}, nil
+}
+
+func makeSelectionResponse(stack config.Stack) selectionResponse {
+	options := make([]transportOptionResponse, 0, len(config.TransportOptions()))
+	for _, option := range config.TransportOptions() {
+		options = append(options, transportOptionResponse{
+			Value: option.Value,
+			Label: option.Label,
+		})
+	}
+	return selectionResponse{
+		AllowedTransports: append([]config.Transport(nil), stack.Selection.AllowedTransports...),
+		Options:           options,
+	}
 }
 
 func writeControlJSON(w http.ResponseWriter, status int, v controlResponse) {

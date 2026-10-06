@@ -160,7 +160,15 @@ export default function App() {
     });
   }
 
-  function restartService(service: "v2raya" | "xray" | "zapret2") {
+  async function updateTransports(transports: string[]) {
+    await actions.controlAction(
+      "selection",
+      { transports },
+      "Разрешённые транспорты обновлены",
+    );
+  }
+
+  function restartService(service: "v2raya") {
     ask({
       title: `Перезапустить ${service}?`,
       description: "На время перезапуска VPN backend может быть недоступен.",
@@ -231,6 +239,7 @@ export default function App() {
             busy={actions.busy}
             onMode={changeMode}
             onPolicy={changePolicy}
+            onTransports={updateTransports}
             onManage={() => setManageOpen(true)}
             onSetPin={actions.setPin}
           />

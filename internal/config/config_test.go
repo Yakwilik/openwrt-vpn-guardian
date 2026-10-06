@@ -1,6 +1,11 @@
 package config
 
-import "testing"
+import (
+	"bytes"
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 func TestDefaultStackValidates(t *testing.T) {
 	cfg := DefaultStack("br-lan", "192.168.8.0/24", "eth1", "/usr/share/xray")
@@ -99,5 +104,41 @@ func TestRoutingValidation(t *testing.T) {
 func TestExampleManifestsValidate(t *testing.T) {
 	if _, _, err := LoadFiles("../../configs/stack.example.json", "../../configs/routing.example.json"); err != nil {
 		t.Fatalf("packaged example manifests must validate: %v", err)
+	}
+}
+
+func TestSaveStackFileIsAtomicAndValidated(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "stack.json")
+	cfg := DefaultStack("br-lan", "192.168.8.0/24", "eth1", "/usr/share/xray")
+	cfg.Selection.AllowedTransports = []Transport{TransportVLESSXHTTPReality}
+
+	if err := saveStackFile(path, cfg); err != nil {
+		t.Fatalf("save valid stack: %v", err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read saved stack: %v", err)
+	}
+
+	invalid := cfg
+	invalid.Selection.AllowedTransports = nil
+	if err := saveStackFile(path, invalid); err == nil {
+		t.Fatal("invalid stack must not be saved")
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read stack after rejected save: %v", err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatal("rejected save changed existing stack file")
+	}
+
+	var loaded Stack
+	if err := readJSON(path, &loaded); err != nil {
+		t.Fatalf("decode saved stack: %v", err)
+	}
+	if len(loaded.Selection.AllowedTransports) != 1 ||
+		loaded.Selection.AllowedTransports[0] != TransportVLESSXHTTPReality {
+		t.Fatalf("saved selection = %v", loaded.Selection.AllowedTransports)
 	}
 }

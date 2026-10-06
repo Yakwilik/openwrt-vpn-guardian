@@ -101,6 +101,16 @@ export interface SubscriptionInfo {
   nodeCount: number;
 }
 
+export interface TransportOption {
+  value: string;
+  label: string;
+}
+
+export interface SelectionState {
+  allowedTransports: string[];
+  options: TransportOption[];
+}
+
 export interface ControlResponse {
   ok: boolean;
   authenticated: boolean;
@@ -114,9 +124,13 @@ export interface ControlResponse {
   frontEnabled: boolean;
   hardKillSwitch: boolean;
   policyMode: string;
+  selection: SelectionState;
   result?: string;
   message?: string;
   error?: string;
 }
 
-export type ControlPayload = Record<string, string | number | boolean | undefined>;
+export type ControlPayload = Record<
+  string,
+  string | number | boolean | string[] | undefined
+>;
