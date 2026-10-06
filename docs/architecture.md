@@ -113,7 +113,9 @@ The candidate count uses the same eligibility code as the watchdog, so *auto-sel
 
 ## Dashboard and API
 
-The dashboard HTML is embedded into the vpn-guardian binary.
+The dashboard is a React + TypeScript application in *webui/*. Vite produces a static production bundle in *internal/api/web/dist*, and the Go server embeds only that generated bundle. UI source, API transport and visual components are therefore separate from the HTTP server implementation.
+
+CI runs the frontend typecheck and build and verifies that the committed bundle matches the source before Go tests and package builds continue.
 
 The native Go HTTP server exposes:
 

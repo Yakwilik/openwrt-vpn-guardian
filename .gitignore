@@ -5,6 +5,7 @@
 *.tar.gz
 .DS_Store
 .idea/
+/webui/node_modules/
 
 # Local router reports may contain environment-specific addresses.
 .local-reports/

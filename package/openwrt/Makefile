@@ -20,7 +20,7 @@ PKG_BUILD_FLAGS:=no-mips16
 
 GO_PKG:=github.com/Yakwilik/openwrt-vpn-guardian
 GO_PKG_BUILD_PKG:=$(GO_PKG)/cmd/vpn-guardian
-GO_PKG_INSTALL_EXTRA:=internal/api/web/.*
+GO_PKG_INSTALL_EXTRA:=internal/api/web/dist/.*
 PKG_ASLR_PIE:=0
 
 include $(INCLUDE_DIR)/package.mk
