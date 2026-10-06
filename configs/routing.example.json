@@ -10,6 +10,7 @@
     "geosite:whatsapp",
     "geosite:soundcloud",
     "geosite:linkedin",
+    "domain:jetbrains.com",
     "domain:buf.build"
   ],
   "proxyIps": []

@@ -33,17 +33,18 @@ type session struct {
 }
 
 type controlRequest struct {
-	Action     string             `json:"action"`
-	PIN        string             `json:"pin,omitempty"`
-	Enabled    bool               `json:"enabled,omitempty"`
-	ID         int                `json:"id,omitempty"`
-	Sub        int                `json:"sub,omitempty"`
-	URL        string             `json:"url,omitempty"`
-	Remarks    string             `json:"remarks,omitempty"`
-	AutoSelect bool               `json:"autoSelect,omitempty"`
-	Confirm    string             `json:"confirm,omitempty"`
-	Service    string             `json:"service,omitempty"`
-	Transports []config.Transport `json:"transports,omitempty"`
+	Action     string               `json:"action"`
+	PIN        string               `json:"pin,omitempty"`
+	Enabled    bool                 `json:"enabled,omitempty"`
+	ID         int                  `json:"id,omitempty"`
+	Sub        int                  `json:"sub,omitempty"`
+	URL        string               `json:"url,omitempty"`
+	Remarks    string               `json:"remarks,omitempty"`
+	AutoSelect bool                 `json:"autoSelect,omitempty"`
+	Confirm    string               `json:"confirm,omitempty"`
+	Service    string               `json:"service,omitempty"`
+	Transports []config.Transport   `json:"transports,omitempty"`
+	Rules      []config.RoutingRule `json:"rules,omitempty"`
 }
 
 type transportOptionResponse struct {
@@ -54,6 +55,16 @@ type transportOptionResponse struct {
 type selectionResponse struct {
 	AllowedTransports []config.Transport        `json:"allowedTransports"`
 	Options           []transportOptionResponse `json:"options"`
+}
+
+type routingRuleOptionResponse struct {
+	Value config.RoutingRuleType `json:"value"`
+	Label string                 `json:"label"`
+}
+
+type routingResponse struct {
+	Rules   []config.RoutingRule        `json:"rules"`
+	Options []routingRuleOptionResponse `json:"options"`
 }
 
 type controlResponse struct {
@@ -70,6 +81,7 @@ type controlResponse struct {
 	HardKillSwitch bool                       `json:"hardKillSwitch"`
 	PolicyMode     string                     `json:"policyMode"`
 	Selection      selectionResponse          `json:"selection"`
+	Routing        routingResponse            `json:"routing"`
 	Result         string                     `json:"result,omitempty"`
 	Message        string                     `json:"message,omitempty"`
 	Error          string                     `json:"error,omitempty"`
@@ -206,11 +218,15 @@ func makeControlResponse(authenticated, configured bool) (controlResponse, error
 	if err != nil {
 		return controlResponse{}, err
 	}
-	stack, err := config.LoadStack()
+	stack, routing, err := config.Load()
 	if err != nil {
 		return controlResponse{}, err
 	}
 	selection := makeSelectionResponse(stack)
+	routingState, err := makeRoutingResponse(routing)
+	if err != nil {
+		return controlResponse{}, err
+	}
 
 	mode := "setup"
 	if configured {
@@ -229,6 +245,7 @@ func makeControlResponse(authenticated, configured bool) (controlResponse, error
 		HardKillSwitch: snap.HardKillSwitch,
 		PolicyMode:     snap.PolicyMode,
 		Selection:      selection,
+		Routing:        routingState,
 	}, nil
 }
 
@@ -244,6 +261,24 @@ func makeSelectionResponse(stack config.Stack) selectionResponse {
 		AllowedTransports: append([]config.Transport(nil), stack.Selection.AllowedTransports...),
 		Options:           options,
 	}
+}
+
+func makeRoutingResponse(routing config.Routing) (routingResponse, error) {
+	rules, err := routing.Rules()
+	if err != nil {
+		return routingResponse{}, err
+	}
+	options := make([]routingRuleOptionResponse, 0, len(config.RoutingRuleOptions()))
+	for _, option := range config.RoutingRuleOptions() {
+		options = append(options, routingRuleOptionResponse{
+			Value: option.Value,
+			Label: option.Label,
+		})
+	}
+	return routingResponse{
+		Rules:   rules,
+		Options: options,
+	}, nil
 }
 
 func writeControlJSON(w http.ResponseWriter, status int, v controlResponse) {

@@ -6,13 +6,14 @@ import { HeaderBar } from "./components/HeaderBar";
 import { HealthGrid } from "./components/HealthGrid";
 import { HistoryChart } from "./components/HistoryChart";
 import { NodesPanel } from "./components/NodesPanel";
+import { RoutingPanel } from "./components/RoutingPanel";
 import { ServicesPanel } from "./components/ServicesPanel";
 import { StatusOverview } from "./components/StatusOverview";
 import { SubscriptionsPanel } from "./components/SubscriptionsPanel";
 import { TrafficPath } from "./components/TrafficPath";
 import { useControlActions } from "./hooks/useControlActions";
 import { useDashboardData } from "./hooks/useDashboardData";
-import type { NodeInfo, SubscriptionInfo } from "./types";
+import type { NodeInfo, RoutingRule, SubscriptionInfo } from "./types";
 
 interface ConfirmState {
   title: string;
@@ -168,6 +169,14 @@ export default function App() {
     );
   }
 
+  async function updateRouting(rules: RoutingRule[]) {
+    await actions.controlAction(
+      "routing",
+      { rules },
+      "Routing обновлён",
+    );
+  }
+
   function restartService(service: "v2raya") {
     ask({
       title: `Перезапустить ${service}?`,
@@ -229,6 +238,11 @@ export default function App() {
             onLatency={() => void actions.testLatency()}
             onSwitch={(node) => void switchNode(node)}
             onPin={(node) => void pinNode(node)}
+          />
+          <RoutingPanel
+            control={dashboard.control}
+            busy={actions.busy}
+            onSave={updateRouting}
           />
         </div>
 

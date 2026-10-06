@@ -111,6 +111,7 @@ func DefaultRouting() Routing {
 			"geosite:whatsapp",
 			"geosite:soundcloud",
 			"geosite:linkedin",
+			"domain:jetbrains.com",
 			"domain:buf.build",
 		},
 	}
@@ -135,11 +136,26 @@ func SaveStack(cfg Stack) error {
 	return saveStackFile(paths.StackConfig, cfg)
 }
 
-func saveStackFile(path string, cfg Stack) (err error) {
+func SaveRouting(cfg Routing) error {
+	return saveRoutingFile(paths.RoutingConfig, cfg)
+}
+
+func saveStackFile(path string, cfg Stack) error {
 	if err := cfg.Validate(); err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(cfg, "", "  ")
+	return saveJSONFile(path, cfg)
+}
+
+func saveRoutingFile(path string, cfg Routing) error {
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
+	return saveJSONFile(path, cfg)
+}
+
+func saveJSONFile(path string, value any) (err error) {
+	data, err := json.MarshalIndent(value, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -259,7 +275,39 @@ func (r Routing) Validate() error {
 	if r.Version != Version {
 		return fmt.Errorf("unsupported routing manifest version %d", r.Version)
 	}
-	return nil
+	_, err := r.RulesUnchecked()
+	return err
+}
+
+func (r Routing) RulesUnchecked() ([]RoutingRule, error) {
+	rules := make([]RoutingRule, 0, len(r.ProxyDomains)+len(r.ProxyIPs))
+	seen := make(map[string]struct{}, cap(rules))
+
+	for _, raw := range r.ProxyDomains {
+		rule, err := parseStoredRoutingRule(raw, true)
+		if err != nil {
+			return nil, err
+		}
+		key := "domain:" + raw
+		if _, exists := seen[key]; exists {
+			return nil, fmt.Errorf("duplicate routing entry %q", raw)
+		}
+		seen[key] = struct{}{}
+		rules = append(rules, rule)
+	}
+	for _, raw := range r.ProxyIPs {
+		rule, err := parseStoredRoutingRule(raw, false)
+		if err != nil {
+			return nil, err
+		}
+		key := "ip:" + raw
+		if _, exists := seen[key]; exists {
+			return nil, fmt.Errorf("duplicate routing entry %q", raw)
+		}
+		seen[key] = struct{}{}
+		rules = append(rules, rule)
+	}
+	return rules, nil
 }
 
 func validatePort(name string, port int) error {

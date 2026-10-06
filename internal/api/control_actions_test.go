@@ -34,3 +34,24 @@ func TestZapret2CannotBeRestartedFromDashboard(t *testing.T) {
 		t.Fatal("v2raya restart must remain available")
 	}
 }
+
+func TestMakeRoutingResponse(t *testing.T) {
+	routing, err := config.RoutingFromRules([]config.RoutingRule{
+		{Type: config.RoutingRuleDomain, Value: "jetbrains.com"},
+		{Type: config.RoutingRuleIP, Value: "203.0.113.0/24"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := makeRoutingResponse(routing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Rules) != 2 {
+		t.Fatalf("rules = %d, want 2", len(got.Rules))
+	}
+	if len(got.Options) != len(config.RoutingRuleOptions()) {
+		t.Fatalf("options = %d, want %d", len(got.Options), len(config.RoutingRuleOptions()))
+	}
+}

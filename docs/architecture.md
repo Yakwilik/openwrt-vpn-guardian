@@ -141,6 +141,8 @@ Control mutations require a management session and CSRF token. Initial managemen
 
 The management UI exposes the transport allowlist from *selection.allowedTransports*. Updates are validated against the shared transport catalogue and the current v2rayA database before *stack.json* is replaced atomically. An empty allowlist or a selection with no eligible nodes is rejected. If the new allowlist excludes a pinned node, the pin is released and control returns to Auto before the watchdog immediately re-evaluates the active backend.
 
+Routing is also editable from the management UI as typed rules: geosite, suffix domain, full domain, regexp, IP/CIDR and GeoIP. The API validates and converts these rules to the existing *proxyDomains*/*proxyIps* manifest format. Applying routing regenerates and validates the Xray configuration, snapshots the previous state, atomically replaces *routing.json* and *front.json*, and restarts only *vpn-front*. A failed restart restores the previous snapshot.
+
 ## Initialization and bootstrap
 
 Installing the OpenWrt package does not activate interception. Run *vpn-guardian init* in an interactive root terminal to configure the router. Both *init* and *bootstrap* use the same Go coordinator in *internal/setup*:

@@ -6,9 +6,13 @@ const ranges = [1, 6, 24] as const;
 
 export function HistoryChart({ history }: { history?: HistoryResponse }) {
   const [hours, setHours] = useState<(typeof ranges)[number]>(6);
-  const samples = useMemo(
-    () => downsample(filterHistory(history?.samples ?? [], hours), 180),
+  const rangeSamples = useMemo(
+    () => filterHistory(history?.samples ?? [], hours),
     [history?.samples, hours],
+  );
+  const samples = useMemo(
+    () => downsample(rangeSamples, 180),
+    [rangeSamples],
   );
 
   const points = samples.map((sample, index) => {
@@ -18,8 +22,15 @@ export function HistoryChart({ history }: { history?: HistoryResponse }) {
   });
   const path = points.map(([x, y], index) => `${index ? "L" : "M"} ${x} ${y}`).join(" ");
 
-  const latest = samples.at(-1);
-  const switches = samples.filter((sample) => sample.switch === 1);
+  const latest = rangeSamples.at(-1);
+  const rangeEnd = latest?.ts ?? Math.floor(Date.now() / 1000);
+  const rangeStart = rangeEnd - hours * 3600;
+  const switches = (history?.events ?? []).filter(
+    (event) =>
+      event.type === "switch" &&
+      event.ts >= rangeStart &&
+      event.ts <= rangeEnd,
+  );
 
   return (
     <section className="panel">
@@ -70,10 +81,21 @@ export function HistoryChart({ history }: { history?: HistoryResponse }) {
               fill="url(#availability-fill)"
             />
             <path className="chart-line" d={path} fill="none" />
-            {samples.map((sample, index) => {
-              if (sample.switch !== 1) return null;
-              const [x, y] = points[index];
-              return <circle className="chart-switch" cx={x} cy={y} r="5" key={sample.ts} />;
+            {switches.map((event) => {
+              const firstTs = rangeSamples[0]?.ts ?? event.ts;
+              const lastTs = rangeSamples.at(-1)?.ts ?? event.ts;
+              const span = Math.max(1, lastTs - firstTs);
+              const x = ((event.ts - firstTs) / span) * 1000;
+              const nearest = rangeSamples.reduce(
+                (best, sample) =>
+                  Math.abs(sample.ts - event.ts) < Math.abs(best.ts - event.ts)
+                    ? sample
+                    : best,
+                rangeSamples[0],
+              );
+              const availability = nearest?.availability ?? 100;
+              const y = 200 - Math.max(0, Math.min(100, availability)) * 1.7;
+              return <circle className="chart-switch" cx={x} cy={y} r="5" key={`${event.ts}:${event.message}`} />;
             })}
           </svg>
         )}

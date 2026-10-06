@@ -111,6 +111,7 @@ type Status struct {
 	Services           ServiceStatus          `json:"services"`
 	TProxy             TProxyStatus           `json:"tproxy"`
 	HealthCount        int                    `json:"health_count"`
+	HealthStatus       string                 `json:"health_status"`
 	Health             map[string]HealthBrief `json:"health"`
 	Events             []string               `json:"events,omitempty"`
 }
@@ -193,6 +194,7 @@ func collectSnapshot(rt *runtimeState) (Status, error) {
 	out.LastFailedAt = state.LastFailure
 	out.LastFailedNode = state.LastFailedNode
 	out.HealthCount = state.LastHealth.Passed
+	out.HealthStatus = state.LastHealth.Status
 	out.Health = make(map[string]HealthBrief, len(state.LastHealth.Results))
 	for _, p := range state.LastHealth.Results {
 		out.Health[p.Name] = HealthBrief{Code: p.Code, MS: p.MS}
@@ -444,16 +446,22 @@ func fetchPublicIP(client *http.Client) (string, error) {
 	return "", fmt.Errorf("no public IP endpoint succeeded")
 }
 
+func historyAvailability(status string) int {
+	switch status {
+	case "healthy":
+		return 100
+	case "degraded":
+		return 50
+	default:
+		return 0
+	}
+}
+
 func appendHistory(rt *runtimeState, s Status, path string) {
 	if !rt.lastHistory.IsZero() && time.Since(rt.lastHistory) < time.Minute {
 		return
 	}
-	availability := 0
-	if s.HealthCount >= 2 {
-		availability = 100
-	} else if s.HealthCount > 0 {
-		availability = s.HealthCount * 25
-	}
+	availability := historyAvailability(s.HealthStatus)
 	failed := 4 - s.HealthCount
 	if failed < 0 {
 		failed = 0

@@ -111,6 +111,21 @@ export interface SelectionState {
   options: TransportOption[];
 }
 
+export interface RoutingRule {
+  type: "geosite" | "domain" | "full" | "regexp" | "ip" | "geoip";
+  value: string;
+}
+
+export interface RoutingRuleOption {
+  value: RoutingRule["type"];
+  label: string;
+}
+
+export interface RoutingState {
+  rules: RoutingRule[];
+  options: RoutingRuleOption[];
+}
+
 export interface ControlResponse {
   ok: boolean;
   authenticated: boolean;
@@ -125,6 +140,7 @@ export interface ControlResponse {
   hardKillSwitch: boolean;
   policyMode: string;
   selection: SelectionState;
+  routing: RoutingState;
   result?: string;
   message?: string;
   error?: string;
@@ -132,5 +148,5 @@ export interface ControlResponse {
 
 export type ControlPayload = Record<
   string,
-  string | number | boolean | string[] | undefined
+  string | number | boolean | string[] | RoutingRule[] | undefined
 >;

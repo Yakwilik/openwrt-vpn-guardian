@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/Yakwilik/openwrt-vpn-guardian/internal/config"
+	"github.com/Yakwilik/openwrt-vpn-guardian/internal/lockfile"
 	"github.com/Yakwilik/openwrt-vpn-guardian/internal/paths"
 	"github.com/Yakwilik/openwrt-vpn-guardian/internal/policy"
 )
@@ -719,6 +720,80 @@ func applyCmd() error {
 	fmt.Println("apply OK")
 	return nil
 }
+
+// ApplyRouting validates and applies only routing state. It intentionally does
+// not restart policy, watchdog, collector or the API because routing rules live
+// exclusively in vpn-front.
+func ApplyRouting(r config.Routing) error {
+	if err := r.Validate(); err != nil {
+		return err
+	}
+
+	s, err := config.LoadStack()
+	if err != nil {
+		return err
+	}
+	dir, err := os.MkdirTemp("/tmp", "vpn-guardian-routing-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(dir)
+
+	if err := generate(dir, s, r); err != nil {
+		return err
+	}
+	if err := validateGenerated(context.Background(), dir, s.AssetsDir); err != nil {
+		return err
+	}
+
+	lockCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	lock, err := lockfile.Acquire(lockCtx, paths.ControlLock)
+	if err != nil {
+		return fmt.Errorf("acquire control lock for routing update: %w", err)
+	}
+	defer lockfile.Release(lock)
+
+	snapshot, err := backup("pre-routing")
+	if err != nil {
+		return fmt.Errorf("backup before routing update: %w", err)
+	}
+	_, markerErr := os.Stat(paths.FrontEnabled)
+	frontWasEnabled := markerErr == nil
+
+	rollback := func(cause error) error {
+		restoreErr := restoreSnapshotSparse(snapshot)
+		if frontWasEnabled {
+			if out, restartErr := run(paths.FrontServiceInit, "restart"); restartErr != nil {
+				restoreErr = errors.Join(restoreErr, fmt.Errorf("restart restored vpn-front: %w: %s", restartErr, out))
+			}
+		}
+		return errors.Join(cause, restoreErr)
+	}
+
+	if err := config.SaveRouting(r); err != nil {
+		return rollback(err)
+	}
+	if err := copyAtomic(
+		filepath.Join(dir, filepath.Base(paths.FrontConfig)),
+		paths.FrontConfig,
+		0644,
+	); err != nil {
+		return rollback(err)
+	}
+
+	if !frontWasEnabled {
+		return nil
+	}
+	if out, err := run(paths.FrontServiceInit, "restart"); err != nil {
+		return rollback(fmt.Errorf("restart vpn-front: %w: %s", err, out))
+	}
+	if !serviceRunning("vpn-front") {
+		return rollback(errors.New("vpn-front is not running after routing update"))
+	}
+	return nil
+}
+
 func rollbackApply(snapshot string, frontWasEnabled bool) {
 	if !frontWasEnabled {
 		cleanupGeneratedRuntime()

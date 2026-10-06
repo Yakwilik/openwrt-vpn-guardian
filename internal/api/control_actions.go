@@ -7,8 +7,10 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/Yakwilik/openwrt-vpn-guardian/internal/config"
 	"github.com/Yakwilik/openwrt-vpn-guardian/internal/control"
 	"github.com/Yakwilik/openwrt-vpn-guardian/internal/paths"
+	stackruntime "github.com/Yakwilik/openwrt-vpn-guardian/internal/stack"
 	v2rayautil "github.com/Yakwilik/openwrt-vpn-guardian/internal/v2raya"
 )
 
@@ -70,6 +72,12 @@ func executeControlAction(req controlRequest) (string, error) {
 		// fatal: the existing daemon will pick up stack.json on its next pass.
 		_ = exec.Command(paths.WatchdogServiceInit, "restart").Run()
 		return "", nil
+	case "routing":
+		routing, err := config.RoutingFromRules(req.Rules)
+		if err != nil {
+			return "", err
+		}
+		return "", stackruntime.ApplyRouting(routing)
 	case "repair":
 		ready, err := v2rayautil.RepairBackendListener(true)
 		if err != nil {
