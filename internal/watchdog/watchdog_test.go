@@ -188,7 +188,7 @@ func TestApplicationProbesAreRequired(t *testing.T) {
 			codes: map[string]int{
 				"google":     204,
 				"cloudflare": 204,
-				"telegram":   200,
+				"telegram":   401,
 				"openai":     401,
 			},
 			want: "healthy",
@@ -198,7 +198,7 @@ func TestApplicationProbesAreRequired(t *testing.T) {
 			codes: map[string]int{
 				"google":     204,
 				"cloudflare": 204,
-				"telegram":   200,
+				"telegram":   401,
 				"openai":     403,
 			},
 			want: "down",
@@ -218,7 +218,7 @@ func TestApplicationProbesAreRequired(t *testing.T) {
 			codes: map[string]int{
 				"google":     0,
 				"cloudflare": 204,
-				"telegram":   200,
+				"telegram":   401,
 				"openai":     401,
 			},
 			want: "healthy",
@@ -228,7 +228,7 @@ func TestApplicationProbesAreRequired(t *testing.T) {
 			codes: map[string]int{
 				"google":     0,
 				"cloudflare": 0,
-				"telegram":   200,
+				"telegram":   401,
 				"openai":     401,
 			},
 			want: "degraded",
@@ -272,8 +272,8 @@ func TestTelegramProbeIsRequired(t *testing.T) {
 	if !target.Required {
 		t.Fatal("telegram health target must be required")
 	}
-	if !target.accepts(200) {
-		t.Fatal("telegram 200 must pass")
+	if !target.accepts(401) {
+		t.Fatal("telegram 401 must prove that the Bot API is reachable")
 	}
 }
 

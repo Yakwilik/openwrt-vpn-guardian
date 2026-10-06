@@ -135,9 +135,9 @@ var healthTargets = []healthTarget{
 	},
 	{
 		Name:           "telegram",
-		URL:            "https://api.telegram.org/",
+		URL:            "https://api.telegram.org/bot0:invalid/getMe",
 		Required:       true,
-		ExpectedStatus: []int{http.StatusOK},
+		ExpectedStatus: []int{http.StatusUnauthorized},
 	},
 	{
 		Name:           "openai",
