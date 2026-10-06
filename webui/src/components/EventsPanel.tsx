@@ -1,8 +1,19 @@
+import { useState } from "react";
 import type { HistoryResponse } from "../types";
 import { formatRouterTime } from "../utils";
 
+const collapsedEventCount = 5;
+const maxEventCount = 60;
+
 export function EventsPanel({ history }: { history?: HistoryResponse }) {
-  const events = [...(history?.events ?? [])].sort((a, b) => b.ts - a.ts).slice(0, 60);
+  const [expanded, setExpanded] = useState(false);
+  const events = [...(history?.events ?? [])]
+    .sort((a, b) => b.ts - a.ts)
+    .slice(0, maxEventCount);
+  const visibleEvents = expanded
+    ? events
+    : events.slice(0, collapsedEventCount);
+  const hiddenCount = Math.max(0, events.length - visibleEvents.length);
 
   return (
     <section className="panel">
@@ -15,7 +26,7 @@ export function EventsPanel({ history }: { history?: HistoryResponse }) {
       </div>
 
       <div className="timeline">
-        {events.map((event, index) => (
+        {visibleEvents.map((event, index) => (
           <div className="timeline-item" key={`${event.ts}:${event.type}:${index}`}>
             <span className={`event-dot event-${event.type}`} />
             <div className="timeline-copy">
@@ -27,6 +38,23 @@ export function EventsPanel({ history }: { history?: HistoryResponse }) {
         ))}
         {events.length === 0 && <div className="empty">Событий пока нет</div>}
       </div>
+
+      {events.length > collapsedEventCount && (
+        <div className="collapse-footer">
+          <span className="collapse-summary">
+            {expanded
+              ? `Показаны последние ${events.length}`
+              : `Показаны последние ${visibleEvents.length} из ${events.length}`}
+          </span>
+          <button
+            className="button button-quiet collapse-button"
+            aria-expanded={expanded}
+            onClick={() => setExpanded((value) => !value)}
+          >
+            {expanded ? "Свернуть" : `Показать все · +${hiddenCount}`}
+          </button>
+        </div>
+      )}
     </section>
   );
 }

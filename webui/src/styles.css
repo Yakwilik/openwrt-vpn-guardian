@@ -886,6 +886,25 @@ button:disabled {
   justify-content: flex-end;
 }
 
+.collapse-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-soft);
+}
+
+.collapse-summary {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.collapse-button {
+  flex: 0 0 auto;
+}
+
 .subscription-grid {
   display: grid;
   gap: 9px;

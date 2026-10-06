@@ -2,6 +2,8 @@ import { useMemo, useState } from "react";
 import type { ControlResponse, NodeInfo } from "../types";
 import { protocolLabel } from "../utils";
 
+const collapsedNodeCount = 5;
+
 interface NodesPanelProps {
   control?: ControlResponse;
   latency: Record<string, string>;
@@ -21,6 +23,7 @@ export function NodesPanel({
 }: NodesPanelProps) {
   const [query, setQuery] = useState("");
   const [protocol, setProtocol] = useState("all");
+  const [expanded, setExpanded] = useState(false);
   const canManage = Boolean(control?.authenticated && control.authConfigured);
   const nodes = control?.nodes ?? [];
 
@@ -47,6 +50,11 @@ export function NodesPanel({
           a.name.localeCompare(b.name),
       );
   }, [nodes, protocol, query]);
+
+  const visibleNodes = expanded
+    ? filtered
+    : filtered.slice(0, collapsedNodeCount);
+  const hiddenCount = Math.max(0, filtered.length - visibleNodes.length);
 
   return (
     <section className="panel">
@@ -86,7 +94,7 @@ export function NodesPanel({
           <span>Latency</span>
           <span />
         </div>
-        {filtered.map((node) => {
+        {visibleNodes.map((node) => {
           const key = `${node.sub}:${node.id}`;
           return (
             <div className={`node-row ${node.active ? "node-active" : ""}`} role="row" key={key}>
@@ -117,6 +125,23 @@ export function NodesPanel({
         })}
         {filtered.length === 0 && <div className="empty">Ноды не найдены</div>}
       </div>
+
+      {filtered.length > collapsedNodeCount && (
+        <div className="collapse-footer">
+          <span className="collapse-summary">
+            {expanded
+              ? `Показаны все ${filtered.length}`
+              : `Показаны ${visibleNodes.length} из ${filtered.length}`}
+          </span>
+          <button
+            className="button button-quiet collapse-button"
+            aria-expanded={expanded}
+            onClick={() => setExpanded((value) => !value)}
+          >
+            {expanded ? "Свернуть" : `Показать все · +${hiddenCount}`}
+          </button>
+        </div>
+      )}
     </section>
   );
 }
