@@ -50,6 +50,8 @@ func run(args []string) error {
 		return nil
 	case "api-server":
 		return api.Serve(commandArgs)
+	case "api-key":
+		return api.RunAPIKey(commandArgs)
 	case "bootstrap", "init", "status", "validate", "apply", "backup", "restore", "cleanup":
 		return stack.Run(args)
 	default:
@@ -70,4 +72,5 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  vpn-guardian control [flags]")
 	fmt.Fprintln(os.Stderr, "  vpn-guardian collector -mode collect -interval 3s")
 	fmt.Fprintln(os.Stderr, "  vpn-guardian api-server [-listen 0.0.0.0:20175]")
+	fmt.Fprintln(os.Stderr, "  vpn-guardian api-key create --output <file>|revoke|status")
 }

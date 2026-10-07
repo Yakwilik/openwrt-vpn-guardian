@@ -1,13 +1,14 @@
 package paths
 
 const (
-	ConfigDir       = "/etc/vpn-guardian"
-	StackConfig     = ConfigDir + "/stack.json"
-	RoutingConfig   = ConfigDir + "/routing.json"
-	ControlConfig   = ConfigDir + "/control.json"
-	AuthConfig      = ConfigDir + "/auth.json"
-	BackupDir       = ConfigDir + "/backups"
-	BootstrapMarker = ConfigDir + "/bootstrap-complete"
+	ConfigDir         = "/etc/vpn-guardian"
+	StackConfig       = ConfigDir + "/stack.json"
+	RoutingConfig     = ConfigDir + "/routing.json"
+	ControlConfig     = ConfigDir + "/control.json"
+	AuthConfig        = ConfigDir + "/auth.json"
+	ServiceAuthConfig = ConfigDir + "/service-auth.json"
+	BackupDir         = ConfigDir + "/backups"
+	BootstrapMarker   = ConfigDir + "/bootstrap-complete"
 
 	GeneratedDir   = ConfigDir + "/generated"
 	FrontConfig    = GeneratedDir + "/front.json"

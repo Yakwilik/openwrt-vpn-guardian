@@ -11,7 +11,8 @@
     "geosite:soundcloud",
     "geosite:linkedin",
     "domain:jetbrains.com",
-    "domain:web.descript.com",
+    "domain:descriptusercontent.com",
+    "domain:descript.com",
     "domain:buf.build"
   ],
   "proxyIps": [],
@@ -27,6 +28,7 @@
     "geosite:linkedin": "LinkedIn",
     "domain:jetbrains.com": "Обновления JetBrains IDE и Toolbox",
     "domain:buf.build": "Buf Schema Registry",
-    "domain:web.descript.com": "Веб-приложение Descript"
+    "domain:descript.com": "Descript: веб-приложение, API, авторизация, транскрипция и first-party CDN",
+    "domain:descriptusercontent.com": "Descript: пользовательские медиа, файлы и assets"
   }
 }

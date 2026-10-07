@@ -137,7 +137,9 @@ OpenWrt firewall policy determines which router interfaces can reach it. The pac
 
 When nginx is already installed, vpn.home.arpa is added as an optional reverse proxy to 127.0.0.1:20175. nginx is not required for the package to work.
 
-Control mutations require a management session and CSRF token. Initial management unlock is accepted only from the LAN CIDR declared in the stack manifest. X-Real-IP is trusted only when the immediate HTTP peer is loopback, which allows a local reverse proxy without allowing direct clients to spoof their source.
+Control mutations from the browser require a management session and CSRF token. Initial management unlock is accepted only from the LAN CIDR declared in the stack manifest. X-Real-IP is trusted only when the immediate HTTP peer is loopback, which allows a local reverse proxy without allowing direct clients to spoof their source.
+
+Automation may use a separate service API key via the standard *Authorization: Bearer* header. *vpn-guardian api-key create --output <file>* writes the plaintext token once to a mode-0600 file while the router stores only its SHA-256 hash in *service-auth.json*. The service key can perform control-plane mutations but cannot log in/out of browser sessions or change the dashboard PIN. It can be rotated by creating a new key and revoked with *vpn-guardian api-key revoke*.
 
 The management UI exposes the transport allowlist from *selection.allowedTransports*. Updates are validated against the shared transport catalogue and the current v2rayA database before *stack.json* is replaced atomically. An empty allowlist or a selection with no eligible nodes is rejected. If the new allowlist excludes a pinned node, the pin is released and control returns to Auto before the watchdog immediately re-evaluates the active backend.
 

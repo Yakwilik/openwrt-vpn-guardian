@@ -99,7 +99,9 @@ func HandleControlHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleControlGET(w http.ResponseWriter, r *http.Request) {
-	token, sess, authenticated := currentSession(r)
+	token, sess, sessionAuthenticated := currentSession(r)
+	serviceAuthenticated := serviceAPIAuthenticated(r)
+	authenticated := sessionAuthenticated || serviceAuthenticated
 	configured := authConfigured()
 
 	resp, err := makeControlResponse(authenticated, configured)
@@ -107,9 +109,13 @@ func handleControlGET(w http.ResponseWriter, r *http.Request) {
 		writeControlError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if authenticated {
+	if sessionAuthenticated {
 		refreshSession(token, &sess)
 		resp.CSRF = sess.CSRF
+	}
+	if serviceAuthenticated {
+		resp.AuthMode = "service-key"
+		resp.CSRF = ""
 	}
 	writeControlJSON(w, http.StatusOK, resp)
 }
@@ -158,6 +164,27 @@ func handleControlPOST(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		resp.CSRF = sess.CSRF
+		writeControlJSON(w, http.StatusOK, resp)
+		return
+	}
+
+	if serviceAPIAuthenticated(r) {
+		if !serviceAPIActionAllowed(req.Action) {
+			writeControlError(w, http.StatusForbidden, "service API key cannot manage browser authentication")
+			return
+		}
+		result, err := executeControlAction(req)
+		if err != nil {
+			writeControlError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		resp, err := makeControlResponse(true, configured)
+		if err != nil {
+			writeControlError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		resp.AuthMode = "service-key"
+		resp.Result = result
 		writeControlJSON(w, http.StatusOK, resp)
 		return
 	}
