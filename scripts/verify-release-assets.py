@@ -24,9 +24,13 @@ def die(message: str) -> None:
 def package_control(path: Path) -> dict[str, str]:
     try:
         with tarfile.open(path, "r:*") as ipk:
-            member = ipk.extractfile("control.tar.gz")
-            if member is None:
+            member_info = next((x for x in ipk.getmembers()
+                                if x.name.lstrip("./") == "control.tar.gz"), None)
+            if member_info is None:
                 die(f"{path.name} lacks control.tar.gz")
+            member = ipk.extractfile(member_info)
+            if member is None:
+                die(f"{path.name} has unreadable control.tar.gz")
             with tarfile.open(fileobj=io.BytesIO(member.read()), mode="r:gz") as ctl:
                 candidate = next((x for x in ctl.getmembers()
                                   if x.name.lstrip("./") == "control"), None)
