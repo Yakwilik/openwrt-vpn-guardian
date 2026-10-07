@@ -412,6 +412,7 @@ func generate(dir string, s Stack, r Routing) error {
 		{filepath.Base(paths.FrontConfig), front},
 		{filepath.Base(paths.DNSXrayConfig), makeDNSXray(s)},
 		{filepath.Base(paths.PolicyFailOpen), makePolicy(s, "failopen")},
+		{filepath.Base(paths.PolicyFailOpenDirect), makePolicy(s, "failopen-direct")},
 		{filepath.Base(paths.PolicyVPNOnly), makePolicy(s, "killswitch")},
 		{filepath.Base(paths.PolicyBlocked), makePolicy(s, "killswitch-blocked")},
 		{filepath.Base(paths.PolicyDirect), makePolicy(s, "direct")},
@@ -498,7 +499,12 @@ func makePolicy(s Stack, mode string) map[string]any {
 			"rules":          []any{map[string]any{"type": "field", "inboundTag": []string{"policy-socks"}, "balancerTag": "vpn-failopen"}},
 			"balancers":      []any{map[string]any{"tag": "vpn-failopen", "selector": []string{"vpn-backend"}, "fallbackTag": "direct", "strategy": map[string]any{"type": "random"}}},
 		}
-		cfg["observatory"] = map[string]any{"subjectSelector": []string{"vpn-backend"}, "probeUrl": s.Policy.ProbeURL, "probeInterval": s.Policy.ProbeInterval, "enableConcurrency": true}
+		// Fail-open must converge quickly after a hard backend failure. Xray's
+		// balancer cannot retry the already selected outbound, so keep the
+		// observatory cadence short; this is independent from dashboard health.
+		cfg["observatory"] = map[string]any{"subjectSelector": []string{"vpn-backend"}, "probeUrl": s.Policy.ProbeURL, "probeInterval": "1s", "enableConcurrency": true}
+	case "failopen-direct":
+		cfg["routing"] = policyRoute("direct")
 	case "killswitch":
 		cfg["routing"] = policyRoute("vpn-backend")
 	case "killswitch-blocked":
@@ -542,6 +548,15 @@ func makeNFT(s Stack) string {
 	}
 	b.WriteString(" }\n  }\n")
 	// DNS clients always reach native dnsmasq, never the Guardian upstream.
+	// Client DNS belongs to the configured LAN only. Management/WAN peers must
+	// use their own resolver and local records; an accidental fw4 allow rule
+	// must not turn this router into their DNS dependency. Router-originated
+	// bootstrap queries use OUTPUT and are deliberately unaffected.
+	b.WriteString("  chain dns_wan_guard {\n    type filter hook input priority filter - 20; policy accept;\n")
+	fmt.Fprintf(&b, "    iifname %q tcp dport 53 counter drop\n", s.WANInterface)
+	fmt.Fprintf(&b, "    iifname %q udp dport 53 counter drop\n", s.WANInterface)
+	b.WriteString("  }\n")
+
 	b.WriteString("  chain dns_redirect {\n    type nat hook prerouting priority -170; policy accept;\n")
 	fmt.Fprintf(&b, "    iifname %q ip saddr %s udp dport 53 redirect to :53\n", s.LANInterface, s.LANCIDR)
 	fmt.Fprintf(&b, "    iifname %q ip saddr %s tcp dport 53 redirect to :53\n", s.LANInterface, s.LANCIDR)
@@ -668,6 +683,7 @@ func validateGenerated(ctx context.Context, dir, assetsDir string) error {
 		filepath.Base(paths.DNSXrayConfig),
 		filepath.Base(paths.FrontConfig),
 		filepath.Base(paths.PolicyFailOpen),
+		filepath.Base(paths.PolicyFailOpenDirect),
 		filepath.Base(paths.PolicyVPNOnly),
 		filepath.Base(paths.PolicyBlocked),
 		filepath.Base(paths.PolicyDirect),
@@ -741,20 +757,21 @@ func applyCmd() error {
 	frontWasEnabled := markerErr == nil
 
 	files := map[string]string{
-		filepath.Base(paths.DNSXrayConfig):  paths.DNSXrayConfig,
-		"vpn-dns-xray.init":                 paths.DNSXrayServiceInit,
-		filepath.Base(paths.FrontConfig):    paths.FrontConfig,
-		filepath.Base(paths.PolicyFailOpen): paths.PolicyFailOpen,
-		filepath.Base(paths.PolicyVPNOnly):  paths.PolicyVPNOnly,
-		filepath.Base(paths.PolicyBlocked):  paths.PolicyBlocked,
-		filepath.Base(paths.PolicyDirect):   paths.PolicyDirect,
-		filepath.Base(paths.FrontNFT):       paths.FrontNFT,
-		"vpn-front.init":                    paths.FrontServiceInit,
-		"vpn-policy.init":                   paths.PolicyServiceInit,
-		"vpn-front-routing.init":            paths.FrontRoutingInit,
-		"vpn-guardian-dns.init":             paths.DNSServiceInit,
-		"vpn-backend-watchdog.init":         paths.WatchdogServiceInit,
-		"vpn-dashboard-collector.init":      paths.CollectorServiceInit,
+		filepath.Base(paths.DNSXrayConfig):        paths.DNSXrayConfig,
+		"vpn-dns-xray.init":                       paths.DNSXrayServiceInit,
+		filepath.Base(paths.FrontConfig):          paths.FrontConfig,
+		filepath.Base(paths.PolicyFailOpen):       paths.PolicyFailOpen,
+		filepath.Base(paths.PolicyFailOpenDirect): paths.PolicyFailOpenDirect,
+		filepath.Base(paths.PolicyVPNOnly):        paths.PolicyVPNOnly,
+		filepath.Base(paths.PolicyBlocked):        paths.PolicyBlocked,
+		filepath.Base(paths.PolicyDirect):         paths.PolicyDirect,
+		filepath.Base(paths.FrontNFT):             paths.FrontNFT,
+		"vpn-front.init":                          paths.FrontServiceInit,
+		"vpn-policy.init":                         paths.PolicyServiceInit,
+		"vpn-front-routing.init":                  paths.FrontRoutingInit,
+		"vpn-guardian-dns.init":                   paths.DNSServiceInit,
+		"vpn-backend-watchdog.init":               paths.WatchdogServiceInit,
+		"vpn-dashboard-collector.init":            paths.CollectorServiceInit,
 	}
 	for src, dst := range files {
 		mode := fs.FileMode(0644)
@@ -1174,6 +1191,7 @@ var backupFiles = []string{
 	paths.FrontConfig,
 	paths.PolicyConfig,
 	paths.PolicyFailOpen,
+	paths.PolicyFailOpenDirect,
 	paths.PolicyVPNOnly,
 	paths.PolicyBlocked,
 	paths.PolicyDirect,
@@ -1297,6 +1315,7 @@ func restore(archive string, preBackup bool) error {
 	for _, source := range []string{
 		paths.FrontConfig,
 		paths.PolicyFailOpen,
+		paths.PolicyFailOpenDirect,
 		paths.PolicyVPNOnly,
 		paths.PolicyBlocked,
 		paths.PolicyDirect,

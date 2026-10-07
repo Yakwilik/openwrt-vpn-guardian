@@ -101,3 +101,35 @@ func TestTransportFailureHasBudgetForFallback(t *testing.T) {
 		t.Fatalf("fallback lost time budget: %s %v", path, err)
 	}
 }
+
+func TestSystemResolverDisagreementPrefersPositiveAnswer(t *testing.T) {
+	negative := testDNS(t, func(w dns.ResponseWriter, q *dns.Msg) {
+		r := new(dns.Msg)
+		r.SetRcode(q, dns.RcodeNameError)
+		_ = w.WriteMsg(r)
+	})
+	positive := testDNS(t, answer)
+	rt := &Runtime{SystemResolvers: []string{negative, positive}}
+	r, err := rt.system(context.Background(), query("youtube.com"))
+	if err != nil || r.Rcode != dns.RcodeSuccess || len(r.Answer) == 0 {
+		t.Fatalf("positive resolver did not override poisoned NXDOMAIN: %v %v", r, err)
+	}
+}
+
+func TestSystemResolverReturnsNegativeWhenAllAreNegative(t *testing.T) {
+	negative1 := testDNS(t, func(w dns.ResponseWriter, q *dns.Msg) {
+		r := new(dns.Msg)
+		r.SetRcode(q, dns.RcodeNameError)
+		_ = w.WriteMsg(r)
+	})
+	negative2 := testDNS(t, func(w dns.ResponseWriter, q *dns.Msg) {
+		r := new(dns.Msg)
+		r.SetReply(q)
+		_ = w.WriteMsg(r)
+	})
+	rt := &Runtime{SystemResolvers: []string{negative1, negative2}}
+	r, err := rt.system(context.Background(), query("absent.example"))
+	if err != nil || r == nil || (r.Rcode != dns.RcodeNameError && r.Rcode != dns.RcodeSuccess) {
+		t.Fatalf("negative DNS result was lost: %v %v", r, err)
+	}
+}

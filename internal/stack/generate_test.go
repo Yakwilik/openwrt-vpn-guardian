@@ -168,3 +168,47 @@ func TestDNSNativeFrontendLoopbackCompatibility(t *testing.T) {
 		t.Fatal("LAN bypasses native dnsmasq")
 	}
 }
+
+func TestFailOpenObservatoryConvergesQuickly(t *testing.T) {
+	cfg := defaultStack("br-test", "192.0.2.0/24", "eth-test", "/opt/xray")
+	raw, err := json.Marshal(makePolicy(cfg, "failopen"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	if !strings.Contains(text, `"probeInterval":"1s"`) {
+		t.Fatalf("fail-open observatory is too slow: %s", text)
+	}
+}
+
+func TestFailOpenDirectPolicyIsDeterministicDirect(t *testing.T) {
+	cfg := defaultStack("br-test", "192.0.2.0/24", "eth-test", "/opt/xray")
+	raw, err := json.Marshal(makePolicy(cfg, "failopen-direct"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	if !strings.Contains(text, `"outboundTag":"direct"`) {
+		t.Fatalf("failopen-direct is not direct: %s", text)
+	}
+	if strings.Contains(text, `"balancerTag"`) {
+		t.Fatalf("failopen-direct must not depend on observatory: %s", text)
+	}
+}
+
+func TestGeneratedDNSRejectsWANClients(t *testing.T) {
+	cfg := defaultStack("br-lan", "192.168.8.0/24", "eth1", "/usr/share/xray")
+	rules := makeNFT(cfg)
+	for _, fragment := range []string{
+		`chain dns_wan_guard`,
+		`iifname "eth1" tcp dport 53 counter drop`,
+		`iifname "eth1" udp dport 53 counter drop`,
+	} {
+		if !strings.Contains(rules, fragment) {
+			t.Fatalf("WAN DNS guard missing %q:\n%s", fragment, rules)
+		}
+	}
+	if strings.Contains(rules, `iifname "eth1" tcp dport 20175 counter drop`) {
+		t.Fatal("WAN DNS guard must not block management API")
+	}
+}

@@ -622,16 +622,20 @@ func readTrimmed(path string) string {
 	return strings.TrimSpace(string(b))
 }
 
-func desiredPolicyRuntime(ctrl Control, _ bool) string {
+func desiredPolicyRuntime(ctrl Control, backendHealthy bool) string {
 	if ctrl.Mode == "direct" {
 		return "direct"
 	}
 	if ctrl.FailurePolicy == "killswitch" {
 		// Keep the proxy class routed only through the VPN backend even while
-		// health is degraded. A dead/unhealthy SOCKS backend fails closed by
-		// itself because vpn-policy has no direct fallback in killswitch mode.
-		// killswitch-blocked is reserved for explicit emergency/invariant use.
+		// health is degraded. A dead/unhealthy backend therefore fails closed.
 		return "killswitch"
+	}
+	if !backendHealthy {
+		// Stabilize fail-open after the first observed failure. Xray's balancer
+		// can provide a faster best-effort fallback, but it does not retry an
+		// already selected dead outbound and can oscillate while probing.
+		return "failopen-direct"
 	}
 	return "failopen"
 }

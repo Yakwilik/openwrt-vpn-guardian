@@ -184,12 +184,22 @@ func (rt *Runtime) system(ctx context.Context, q *dns.Msg) (*dns.Msg, error) {
 		return nil, errors.New("system DNS has no usable upstream")
 	}
 	var errs []error
+	var negative *dns.Msg
 	for _, ep := range upstreams {
 		attempt, cancel := context.WithTimeout(ctx, 900*time.Millisecond)
 		reply, err := exchangeDirect(attempt, q, ep)
 		cancel()
 		if usable(reply, err) {
-			return reply, nil
+			// Direct resolvers on captive/filtered networks can disagree. A positive
+			// answer wins over an earlier NXDOMAIN/NODATA. Preserve a negative only
+			// if every usable system upstream agrees by failing to produce data.
+			if reply.Rcode == dns.RcodeSuccess && len(reply.Answer) > 0 {
+				return reply, nil
+			}
+			if negative == nil {
+				negative = reply
+			}
+			continue
 		}
 		if err == nil {
 			err = errors.New("system upstream returned DNS failure")
@@ -198,6 +208,9 @@ func (rt *Runtime) system(ctx context.Context, q *dns.Msg) (*dns.Msg, error) {
 		if ctx.Err() != nil {
 			break
 		}
+	}
+	if negative != nil {
+		return negative, nil
 	}
 	return nil, errors.Join(errs...)
 }

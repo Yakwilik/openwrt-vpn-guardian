@@ -35,8 +35,13 @@ func DNSRuntimeAt(root string) string {
 	if mode == "direct" && control.Mode == "direct" {
 		return "direct"
 	}
-	if mode == "failopen" && (control.Mode == "auto" || control.Mode == "pinned") && control.FailurePolicy == "failopen" {
-		return "failopen"
+	if (control.Mode == "auto" || control.Mode == "pinned") && control.FailurePolicy == "failopen" {
+		if mode == "failopen-direct" {
+			return "direct"
+		}
+		if mode == "failopen" {
+			return "failopen"
+		}
 	}
 	return "killswitch"
 }

@@ -272,7 +272,7 @@ func collectSnapshot(rt *runtimeState) (Status, error) {
 	}
 	out.EgressIP = rt.lastEgress
 
-	out.FallbackDirect = ctrl.FailurePolicy == "failopen" && state.LastHealth.Status == "down"
+	out.FallbackDirect = policy.Runtime() == "failopen-direct" || (ctrl.FailurePolicy == "failopen" && state.LastHealth.Status == "down")
 	out.DNSOnlyProxyDomains = stack.DNS.ProxyOnly()
 	key := dnsConfigKey(stack)
 	if rt.lastDNSKey != key || time.Since(rt.lastDNSAt) > 15*time.Second {

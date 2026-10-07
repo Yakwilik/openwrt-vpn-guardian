@@ -13,12 +13,15 @@ import (
 	"github.com/Yakwilik/openwrt-vpn-guardian/internal/dnsproxy"
 	"github.com/Yakwilik/openwrt-vpn-guardian/internal/lockfile"
 	"github.com/Yakwilik/openwrt-vpn-guardian/internal/paths"
+	"github.com/Yakwilik/openwrt-vpn-guardian/internal/policy"
 )
 
-// InstallDNSRuntime upgrades just the DNS dispatcher, DNS-only Xray and LAN
-// capture rules. It never rewrites/restarts vpn-front, vpn-policy or v2rayA and
-// never changes the management firewall or IP policy routes. Native dnsmasq
-// stays on :53; router bootstrap is independently fed by the netifd WAN file.
+// InstallDNSRuntime upgrades the dnsmasq-first integration, DNS dispatcher,
+// DNS-only Xray and the policy variants needed by that architecture. It never
+// rewrites/restarts vpn-front or v2rayA and never changes the management
+// firewall or IP policy routes. vpn-policy is restarted only when its generated
+// policy schema actually changed. Native dnsmasq stays on :53; router bootstrap
+// is independently fed by the preserved system/WAN DNS sources.
 func InstallDNSRuntime() error {
 	if _, err := os.Stat(paths.FrontEnabled); err != nil {
 		return errors.New("DNS-only upgrade requires an initialized active stack")
@@ -50,8 +53,32 @@ func InstallDNSRuntime() error {
 	if err := jsonWrite(xr, makeDNSXray(s)); err != nil {
 		return err
 	}
-	if out, err := run("/usr/bin/xray", "run", "-test", "-config", xr); err != nil {
-		return fmt.Errorf("DNS Xray config: %w: %s", err, out)
+	policyConfigs := []struct {
+		path string
+		mode string
+	}{
+		{paths.PolicyFailOpen, "failopen"},
+		{paths.PolicyFailOpenDirect, "failopen-direct"},
+		{paths.PolicyVPNOnly, "killswitch"},
+		{paths.PolicyBlocked, "killswitch-blocked"},
+		{paths.PolicyDirect, "direct"},
+	}
+	for _, item := range policyConfigs {
+		target := filepath.Join(dir, filepath.Base(item.path))
+		if err := jsonWrite(target, makePolicy(s, item.mode)); err != nil {
+			return err
+		}
+	}
+	for _, target := range append([]string{xr}, func() []string {
+		result := make([]string, 0, len(policyConfigs))
+		for _, item := range policyConfigs {
+			result = append(result, filepath.Join(dir, filepath.Base(item.path)))
+		}
+		return result
+	}()...) {
+		if out, err := run("/usr/bin/xray", "run", "-test", "-config", target); err != nil {
+			return fmt.Errorf("Xray config %s: %w: %s", filepath.Base(target), err, out)
+		}
 	}
 	nft := filepath.Join(dir, "front.nft")
 	if err := os.WriteFile(nft, []byte(makeNFT(s)), 0600); err != nil {
@@ -70,8 +97,26 @@ func InstallDNSRuntime() error {
 		src, dst string
 		mode     os.FileMode
 	}{
-		{xr, paths.DNSXrayConfig, 0600}, {filepath.Join(dir, "dns.init"), paths.DNSServiceInit, 0755},
-		{filepath.Join(dir, "dns-xray.init"), paths.DNSXrayServiceInit, 0755}, {nft, paths.FrontNFT, 0600},
+		{xr, paths.DNSXrayConfig, 0600},
+		{filepath.Join(dir, "dns.init"), paths.DNSServiceInit, 0755},
+		{filepath.Join(dir, "dns-xray.init"), paths.DNSXrayServiceInit, 0755},
+		{nft, paths.FrontNFT, 0600},
+	}
+	for _, item := range policyConfigs {
+		files = append(files, struct {
+			src, dst string
+			mode     os.FileMode
+		}{filepath.Join(dir, filepath.Base(item.path)), item.path, 0600})
+	}
+	runtimeMode := policy.Runtime()
+	policyChanged := false
+	for _, item := range policyConfigs {
+		want, readErr := os.ReadFile(filepath.Join(dir, filepath.Base(item.path)))
+		have, haveErr := os.ReadFile(item.path)
+		if readErr != nil || haveErr != nil || string(want) != string(have) {
+			policyChanged = true
+			break
+		}
 	}
 	previous := make([]setupFile, 0, len(files))
 	for _, file := range files {
@@ -95,12 +140,20 @@ func InstallDNSRuntime() error {
 			_, e := run("nft", "-f", paths.FrontNFT)
 			cause = errors.Join(cause, e)
 		}
+		if policyChanged {
+			cause = errors.Join(cause, policy.Apply(runtimeMode))
+		}
 		_, e := run(paths.DNSServiceInit, "restart")
 		return errors.Join(cause, e)
 	}
 	for _, file := range files {
 		if err := copyAtomic(file.src, file.dst, file.mode); err != nil {
 			return rollback(err)
+		}
+	}
+	if policyChanged {
+		if err := policy.Apply(runtimeMode); err != nil {
+			return rollback(fmt.Errorf("activate migrated policy runtime %s: %w", runtimeMode, err))
 		}
 	}
 	if err := syncDNSXrayService(s); err != nil {

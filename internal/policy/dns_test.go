@@ -10,6 +10,7 @@ func TestDNSRuntimeIsConservativeDuringTransitions(t *testing.T) {
 	for _, tt := range []struct{ name, control, runtime, want string }{
 		{"healthy VPN", `{"mode":"auto","failurePolicy":"killswitch"}`, "killswitch", "killswitch"},
 		{"failopen", `{"mode":"auto","failurePolicy":"failopen"}`, "failopen", "failopen"},
+		{"failopen stabilized direct", `{"mode":"auto","failurePolicy":"failopen"}`, "failopen-direct", "direct"},
 		{"pinned failopen", `{"mode":"pinned","failurePolicy":"failopen"}`, "failopen", "failopen"},
 		{"direct", `{"mode":"direct","failurePolicy":"killswitch"}`, "direct", "direct"},
 		{"tightening", `{"mode":"auto","failurePolicy":"killswitch"}`, "failopen", "killswitch"},

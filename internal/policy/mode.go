@@ -41,6 +41,9 @@ func Apply(mode string) error {
 	if mode == "killswitch-blocked" {
 		public = "killswitch"
 	}
+	if mode == "failopen-direct" {
+		public = "failopen"
+	}
 
 	src := filepath.Join(paths.GeneratedDir, "policy-"+mode+".json")
 	if _, err := os.Stat(src); err != nil {
@@ -77,7 +80,7 @@ func validPublicMode(mode string) bool {
 }
 
 func validRuntimeMode(mode string) bool {
-	return validPublicMode(mode) || mode == "killswitch-blocked"
+	return validPublicMode(mode) || mode == "killswitch-blocked" || mode == "failopen-direct"
 }
 
 func waitPolicyReady(timeout time.Duration) error {

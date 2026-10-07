@@ -55,9 +55,12 @@ The client entry point is native dnsmasq on port 53. Guardian captures ordinary 
 LAN -> dnsmasq:53 -> local answer
                   -> Guardian 127.0.0.1:20176 -> external DNS policy
 router/VPN bootstrap -> original system DNS + current WAN DNS
+management/WAN network -> its own DNS, never GL-MT client DNS
 ~~~
 
-Guardian listens only on loopback and is dnsmasq's sole default upstream. dnsmasq uses *no-resolv* for client forwarding; its internal split-horizon zone servers remain native. Original system resolver endpoints are saved separately from the managed dnsmasq settings. Guardian's direct DNS path reads those original endpoints and the live netifd resolver file; it never sends a query back into dnsmasq. Numeric validation rejects loopback, unspecified and router-owned addresses to prevent recursion.
+Only traffic entering from the configured LAN bridge is captured by Guardian's DNS nft rules. The management/WAN network is not a DNS client of this router: Guardian's own nft table explicitly drops inbound TCP/UDP 53 on the configured WAN interface, even if a vendor firewall allow-rule is added accidentally. Router-originated DNS uses OUTPUT and is unaffected. If an upstream router also needs names such as *.home.arpa*, it owns equivalent local records itself instead of forwarding DNS to GL-MT.
+
+Guardian listens only on loopback and is dnsmasq's sole default upstream. dnsmasq uses *no-resolv* for client forwarding; its internal split-horizon zone servers remain native. Original system resolver endpoints are saved separately from the managed dnsmasq settings. Guardian's direct DNS path reads those original endpoints first and keeps the live netifd resolver file as an additional fallback source; it never sends a query back into dnsmasq. This avoids adding latency or availability dependence on an unreliable WAN-advertised resolver when explicit working system resolvers already exist. Numeric validation rejects loopback, unspecified and router-owned addresses to prevent recursion.
 
 External DNS modes are *system* (real system/WAN upstreams), *custom* (configured numeric upstreams through the active VPN backend), and *xray* (the separate DNS-only Xray process through the active VPN backend). Xray-mode record types not handled by its built-in A/AAAA resolver are forwarded through the VPN backend without record-type substitution. System mode explicitly selects direct DNS.
 
@@ -122,6 +125,8 @@ An absent, empty, unknown or duplicate allowlist is a configuration error. Runti
 Watchdog, collector, control and setup use the same candidate policy and database reader in *internal/v2raya*. The reader keeps subscription ordering and node positions in one SQLite read transaction. Forbidden transports and invalid subscription references cannot become candidates or inflate the eligible count.
 
 A selected node outside the allowlist cannot be declared healthy merely because its SOCKS endpoint responds. Automatic mode selects an allowed node; pinned mode keeps automatic switching disabled and applies the configured failure policy. VPN-only remains fail-closed for the proxy class.
+
+Fail-open has two internal runtime states. While the backend is healthy, *policy_runtime=failopen* keeps the VPN backend preferred. On the first confirmed unhealthy runtime observation, watchdog applies the deterministic *failopen-direct* policy instead of relying solely on Xray's balancer/observatory behavior. The public policy remains *failopen*. When backend health recovers, watchdog returns runtime to *failopen*. DNS reads the same applied runtime: *failopen* permits a per-query system fallback after VPN DNS failure, while *failopen-direct* sends protected DNS directly to system resolvers immediately. Every transition clears dnsmasq cache through procd so stale policy answers are not retained.
 
 Selection combines the existing transport priority with EWMA latency, recent failures and exponential cooldown.
 

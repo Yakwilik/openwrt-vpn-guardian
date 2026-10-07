@@ -301,3 +301,26 @@ func TestAlternativeExcludesCurrentIdentityEvenWithReindexedTouch(t *testing.T) 
 		t.Fatalf("current identity was not excluded: %#v", got)
 	}
 }
+
+func TestDesiredPolicyRuntimeFailOpenStabilizesOnHealth(t *testing.T) {
+	tests := []struct {
+		name    string
+		ctrl    Control
+		healthy bool
+		want    string
+	}{
+		{"vpn-only healthy", Control{Mode: "auto", FailurePolicy: "killswitch"}, true, "killswitch"},
+		{"vpn-only down", Control{Mode: "auto", FailurePolicy: "killswitch"}, false, "killswitch"},
+		{"fail-open healthy", Control{Mode: "auto", FailurePolicy: "failopen"}, true, "failopen"},
+		{"fail-open down", Control{Mode: "auto", FailurePolicy: "failopen"}, false, "failopen-direct"},
+		{"pinned fail-open down", Control{Mode: "pinned", FailurePolicy: "failopen"}, false, "failopen-direct"},
+		{"explicit direct", Control{Mode: "direct", FailurePolicy: "killswitch"}, false, "direct"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := desiredPolicyRuntime(tt.ctrl, tt.healthy); got != tt.want {
+				t.Fatalf("runtime = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
