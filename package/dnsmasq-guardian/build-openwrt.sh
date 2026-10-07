@@ -26,9 +26,25 @@ fi
   cd "$package_dir/upstream"
   sha256sum -c ../upstream.sha256 > /dev/null
 )
-destination="$sdk/package/network/services/dnsmasq"
+# SDK feeds install an active package symlink at package/feeds/base/dnsmasq.
+# Overriding package/network/services/dnsmasq would silently leave that feed
+# symlink pointing at the *unpatched* r4 recipe. Replace the resolved active
+# package source, and keep the original in a directory outside the package
+# scanner to prevent duplicates.
+active="$sdk/package/feeds/base/dnsmasq"
+if [ -L "$active" ]; then
+  destination=$(readlink -f "$active")
+  case "$destination" in
+    "$sdk/"*) ;;
+    *) echo "Refusing to override dnsmasq outside this SDK: $destination" >&2; exit 1 ;;
+  esac
+elif [ -d "$active" ]; then
+  destination="$active"
+else
+  destination="$sdk/package/network/services/dnsmasq"
+fi
 backup="$sdk/guardian-original-dnsmasq-recipe"
-stage="$sdk/package/network/services/dnsmasq-guardian-stage"
+stage="$sdk/.guardian-dnsmasq-stage"
 if [ -e "$stage" ]; then
   echo "Staging directory already exists: $stage" >&2
   exit 1

@@ -161,7 +161,10 @@ JOBS=2 ./build-openwrt.sh /path/to/openwrt-sdk
 JOBS=2 ./build-openwrt.sh /path/to/openwrt-sdk --glinet
 ~~~
 
-The build helper keeps a copy of the SDK's original dnsmasq recipe outside the
+The build helper replaces the SDK's *active* base-feed dnsmasq recipe (which
+is normally reached through *package/feeds/base/dnsmasq*). This is important:
+staging a second inactive recipe would produce an unmodified dnsmasq package.
+The helper keeps a copy of the SDK's original dnsmasq recipe outside the
 package search tree. It does not install anything on a router or rewrite the
 router configuration. The resulting package must be inspected for target
 architecture, dependencies and compile-time features before deployment.

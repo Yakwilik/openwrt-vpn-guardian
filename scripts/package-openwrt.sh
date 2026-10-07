@@ -95,6 +95,10 @@ PY
 # variants separately; never ship a vanilla dnsmasq that silently treats
 # regex: selectors as literal domain names.
 "$source_mirror/package-source/package/dnsmasq-guardian/build-openwrt.sh" "$sdk_dir" --prepare-only
+# Verify which recipe the SDK's actual package/dnsmasq target resolves to.
+# A silent fallback to the unpatched base feed would emit a valid r4 IPK.
+grep -Fx 'dnsmasq 2.90-r5 plus native regex selectors and reload ack, revision 5.1; glinet=0' package/feeds/base/dnsmasq/guardian-regex-recipe
+grep -Fx 'PKG_RELEASE:=5.1' package/feeds/base/dnsmasq/Makefile
 make defconfig
 grep -Fx 'CONFIG_PACKAGE_dnsmasq-full=m' .config
 for flag in dhcp dhcpv6 dnssec auth ipset nftset conntrack noid tftp; do
@@ -111,6 +115,8 @@ make package/vpn-guardian/compile V=s
 # The GL.iNet build adds the vendor-compatible SO_MARK and init behavior.
 # Clear all old compile stamps before rebuilding the same package revision.
 "$source_mirror/package-source/package/dnsmasq-guardian/build-openwrt.sh" "$sdk_dir" --prepare-only --glinet
+grep -Fx 'dnsmasq 2.90-r5 plus native regex selectors and reload ack, revision 5.1; glinet=1' package/feeds/base/dnsmasq/guardian-regex-recipe
+grep -Fx 'PKG_RELEASE:=5.1' package/feeds/base/dnsmasq/Makefile
 make package/dnsmasq/clean V=s
 make -j"${JOBS:-2}" package/dnsmasq/compile V=s
 "$source_dir/scripts/export-dnsmasq-openwrt.sh" "$sdk_dir" "$output_dir" "$expected_arch" glinet "$source_commit"
