@@ -103,16 +103,16 @@ done
 mkdir -p "$sdk_dir/bin"
 find "$sdk_dir/bin" -type f \( -name 'vpn-guardian_*.ipk' -o -name 'v2raya_*.ipk' \) -delete
 # Compile native DNS first so all dependency checks use the patched recipe.
-make package/network/services/dnsmasq/clean V=s
-make -j"${JOBS:-2}" package/network/services/dnsmasq/compile V=s
+make package/dnsmasq/clean V=s
+make -j"${JOBS:-2}" package/dnsmasq/compile V=s
 "$source_dir/scripts/export-dnsmasq-openwrt.sh" "$sdk_dir" "$output_dir" "$expected_arch" openwrt "$source_commit"
 make package/v2raya/compile V=s
 make package/vpn-guardian/compile V=s
 # The GL.iNet build adds the vendor-compatible SO_MARK and init behavior.
 # Clear all old compile stamps before rebuilding the same package revision.
 "$source_mirror/package-source/package/dnsmasq-guardian/build-openwrt.sh" "$sdk_dir" --prepare-only --glinet
-make package/network/services/dnsmasq/clean V=s
-make -j"${JOBS:-2}" package/network/services/dnsmasq/compile V=s
+make package/dnsmasq/clean V=s
+make -j"${JOBS:-2}" package/dnsmasq/compile V=s
 "$source_dir/scripts/export-dnsmasq-openwrt.sh" "$sdk_dir" "$output_dir" "$expected_arch" glinet "$source_commit"
 
 go_tool="$(find -L "$sdk_dir/staging_dir/hostpkg" -type f -path '*/bin/go' -print -quit)"

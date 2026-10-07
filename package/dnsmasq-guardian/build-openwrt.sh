@@ -65,4 +65,4 @@ if [ ! -f "$sdk/.config" ] || ! awk '/^CONFIG_PACKAGE_dnsmasq-full=[my]$/ { foun
   echo 'Preserve the deployed feature flags, including DHCP, DHCPv6, DNSSEC, auth, conntrack, ipset, nftset and TFTP.' >&2
   exit 1
 fi
-make -C "$sdk" -j"${JOBS:-2}" package/network/services/dnsmasq/compile V=s
+make -C "$sdk" -j"${JOBS:-2}" package/dnsmasq/compile V=s
