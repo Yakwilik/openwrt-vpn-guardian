@@ -91,3 +91,18 @@ func TestNftReloadIsAtomicAndFailsClosed(t *testing.T) {
 		t.Fatal("reload must not flush active policy routes")
 	}
 }
+
+func TestGeneratedFrontBypassesDNATReplies(t *testing.T) {
+	cfg := defaultStack("br-test", "192.0.2.0/24", "eth-test", "/opt/xray")
+	nft := makeNFT(cfg)
+
+	const rule = `iifname "br-test" ip saddr 192.0.2.0/24 ct status dnat return`
+	if got := strings.Count(nft, rule); got != 2 {
+		t.Fatalf("DNAT reply bypass count = %d, want 2:\n%s", got, nft)
+	}
+
+	tproxy := `iifname "br-test" ip saddr 192.0.2.0/24 meta nfproto ipv4 meta l4proto { tcp, udp }`
+	if strings.Index(nft, rule) > strings.Index(nft, tproxy) {
+		t.Fatalf("DNAT bypass must run before TPROXY marking:\n%s", nft)
+	}
+}

@@ -519,12 +519,14 @@ func makeNFT(s Stack) string {
 	}
 	b.WriteString(" }\n  }\n  chain prerouting {\n")
 	b.WriteString("    type filter hook prerouting priority mangle - 10; policy accept;\n")
+	fmt.Fprintf(&b, "    iifname %q ip saddr %s ct status dnat return\n", s.LANInterface, s.LANCIDR)
 	fmt.Fprintf(&b, "    iifname %q ip saddr %s ip daddr @bypass4 return\n", s.LANInterface, s.LANCIDR)
 	fmt.Fprintf(&b, "    iifname %q ip saddr %s meta nfproto ipv4 meta l4proto { tcp, udp } meta mark set 0x%x ct mark set meta mark tproxy ip to 127.0.0.1:%d accept\n", s.LANInterface, s.LANCIDR, s.Front.Mark, s.Front.TProxyPort)
 	// A missing transparent socket must not fall through to ordinary WAN
 	// forwarding or an unrelated HTTP listener on the router.
 	fmt.Fprintf(&b, "    iifname %q ip saddr %s meta nfproto ipv4 meta l4proto { tcp, udp } counter drop\n", s.LANInterface, s.LANCIDR)
 	b.WriteString("  }\n  chain forward_guard {\n    type filter hook forward priority filter - 10; policy accept;\n")
+	fmt.Fprintf(&b, "    iifname %q ip saddr %s ct status dnat return\n", s.LANInterface, s.LANCIDR)
 	fmt.Fprintf(&b, "    iifname %q ip saddr %s ip daddr @bypass4 return\n", s.LANInterface, s.LANCIDR)
 	fmt.Fprintf(&b, "    iifname %q ip saddr %s meta mark & 0x%x == 0x%x counter drop\n", s.LANInterface, s.LANCIDR, s.Front.Mark, s.Front.Mark)
 	b.WriteString("  }\n}\n")

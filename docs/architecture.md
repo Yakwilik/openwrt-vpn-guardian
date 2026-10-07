@@ -23,7 +23,7 @@ v2rayA is deliberately kept in backend-only mode with its transparent proxy disa
 
 *vpn-front* is a stable Xray process that owns the LAN TPROXY entry point.
 
-The nftables prerouting rule intercepts LAN TCP/UDP traffic and sends it to vpn-front. Private/local destination ranges are bypassed before interception.
+The nftables prerouting rule intercepts LAN TCP/UDP traffic and sends it to vpn-front. Private/local destination ranges are bypassed before interception. Replies for connections DNATed into the LAN are also bypassed so externally forwarded services preserve their conntrack/NAT return path instead of being re-marked by TPROXY.
 
 vpn-front classifies traffic using:
 
