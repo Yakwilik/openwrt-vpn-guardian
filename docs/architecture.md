@@ -141,7 +141,9 @@ Control mutations require a management session and CSRF token. Initial managemen
 
 The management UI exposes the transport allowlist from *selection.allowedTransports*. Updates are validated against the shared transport catalogue and the current v2rayA database before *stack.json* is replaced atomically. An empty allowlist or a selection with no eligible nodes is rejected. If the new allowlist excludes a pinned node, the pin is released and control returns to Auto before the watchdog immediately re-evaluates the active backend.
 
-Routing is also editable from the management UI as typed rules: geosite, suffix domain, full domain, regexp, IP/CIDR and GeoIP. The API validates and converts these rules to the existing *proxyDomains*/*proxyIps* manifest format. Applying routing regenerates and validates the Xray configuration, snapshots the previous state, atomically replaces *routing.json* and *front.json*, and restarts only *vpn-front*. A failed restart restores the previous snapshot.
+Routing is also editable from the management UI as typed rules: geosite, suffix domain, full domain, regexp, IP/CIDR and GeoIP. Each rule may carry a short human-readable note explaining why it exists; notes are persisted in the routing manifest and returned by the API. The API validates rule type/value, note length and duplicate/orphan metadata, then converts the rules to the existing *proxyDomains*/*proxyIps* runtime format. Applying routing regenerates and validates the Xray configuration, snapshots the previous state, atomically replaces *routing.json* and *front.json*, and restarts only *vpn-front*. A failed restart restores the previous snapshot.
+
+The explicit Telegram IPv4/IPv6 routes in the deployed configuration mirror Telegram's official CIDR list at *https://core.telegram.org/resources/cidr.txt*. They complement the Telegram geosite rule for clients or protocol flows that connect to Telegram infrastructure by IP instead of relying on DNS/SNI matching.
 
 ## Initialization and bootstrap
 

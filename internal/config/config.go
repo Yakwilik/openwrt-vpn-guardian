@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/Yakwilik/openwrt-vpn-guardian/internal/paths"
@@ -52,9 +53,10 @@ type Policy struct {
 }
 
 type Routing struct {
-	Version      int      `json:"version"`
-	ProxyDomains []string `json:"proxyDomains"`
-	ProxyIPs     []string `json:"proxyIps"`
+	Version      int               `json:"version"`
+	ProxyDomains []string          `json:"proxyDomains"`
+	ProxyIPs     []string          `json:"proxyIps"`
+	Notes        map[string]string `json:"notes,omitempty"`
 }
 
 func DefaultStack(lanInterface, lanCIDR, wanInterface, assetsDir string) Stack {
@@ -112,7 +114,22 @@ func DefaultRouting() Routing {
 			"geosite:soundcloud",
 			"geosite:linkedin",
 			"domain:jetbrains.com",
+			"domain:web.descript.com",
 			"domain:buf.build",
+		},
+		Notes: map[string]string{
+			"geosite:openai":          "OpenAI / ChatGPT",
+			"geosite:anthropic":       "Anthropic / Claude",
+			"geosite:google-gemini":   "Google Gemini",
+			"geosite:github":          "GitHub",
+			"geosite:youtube":         "YouTube",
+			"geosite:telegram":        "Домены Telegram",
+			"geosite:whatsapp":        "WhatsApp",
+			"geosite:soundcloud":      "SoundCloud",
+			"geosite:linkedin":        "LinkedIn",
+			"domain:jetbrains.com":    "Обновления JetBrains IDE и Toolbox",
+			"domain:web.descript.com": "Веб-приложение Descript",
+			"domain:buf.build":        "Buf Schema Registry",
 		},
 	}
 }
@@ -282,6 +299,7 @@ func (r Routing) Validate() error {
 func (r Routing) RulesUnchecked() ([]RoutingRule, error) {
 	rules := make([]RoutingRule, 0, len(r.ProxyDomains)+len(r.ProxyIPs))
 	seen := make(map[string]struct{}, cap(rules))
+	stored := make(map[string]struct{}, cap(rules))
 
 	for _, raw := range r.ProxyDomains {
 		rule, err := parseStoredRoutingRule(raw, true)
@@ -293,6 +311,11 @@ func (r Routing) RulesUnchecked() ([]RoutingRule, error) {
 			return nil, fmt.Errorf("duplicate routing entry %q", raw)
 		}
 		seen[key] = struct{}{}
+		stored[raw] = struct{}{}
+		rule.Note = strings.TrimSpace(r.Notes[raw])
+		if _, err := normalizeRoutingNote(rule.Note); err != nil {
+			return nil, fmt.Errorf("routing note for %q: %w", raw, err)
+		}
 		rules = append(rules, rule)
 	}
 	for _, raw := range r.ProxyIPs {
@@ -305,7 +328,20 @@ func (r Routing) RulesUnchecked() ([]RoutingRule, error) {
 			return nil, fmt.Errorf("duplicate routing entry %q", raw)
 		}
 		seen[key] = struct{}{}
+		stored[raw] = struct{}{}
+		rule.Note = strings.TrimSpace(r.Notes[raw])
+		if _, err := normalizeRoutingNote(rule.Note); err != nil {
+			return nil, fmt.Errorf("routing note for %q: %w", raw, err)
+		}
 		rules = append(rules, rule)
+	}
+	for raw, note := range r.Notes {
+		if _, exists := stored[raw]; !exists {
+			return nil, fmt.Errorf("routing note refers to unknown entry %q", raw)
+		}
+		if _, err := normalizeRoutingNote(note); err != nil {
+			return nil, fmt.Errorf("routing note for %q: %w", raw, err)
+		}
 	}
 	return rules, nil
 }

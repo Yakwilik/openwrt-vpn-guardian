@@ -25,6 +25,7 @@ export function RoutingPanel({
   const [rules, setRules] = useState<RoutingRule[]>(serverRules);
   const [type, setType] = useState<RoutingRule["type"]>("domain");
   const [value, setValue] = useState("");
+  const [note, setNote] = useState("");
 
   useEffect(() => {
     setRules(serverRules);
@@ -40,8 +41,17 @@ export function RoutingPanel({
     const normalized = value.trim();
     if (!normalized) return;
     if (rules.some((rule) => rule.type === type && rule.value === normalized)) return;
-    setRules((current) => [...current, { type, value: normalized }]);
+    const normalizedNote = note.trim();
+    setRules((current) => [
+      ...current,
+      {
+        type,
+        value: normalized,
+        ...(normalizedNote ? { note: normalizedNote } : {}),
+      },
+    ]);
     setValue("");
+    setNote("");
   }
 
   return (
@@ -58,7 +68,12 @@ export function RoutingPanel({
         {rules.map((rule, index) => (
           <div className="routing-row" key={`${rule.type}:${rule.value}:${index}`}>
             <span className="routing-type">{rule.type}</span>
-            <span className="routing-value mono">{rule.value}</span>
+            <div className="routing-copy">
+              <span className="routing-value mono">{rule.value}</span>
+              <span className={`routing-note ${rule.note ? "" : "routing-note-empty"}`}>
+                {rule.note || "Без заметки"}
+              </span>
+            </div>
             {canManage && (
               <button
                 className="button button-danger-quiet"
@@ -92,6 +107,13 @@ export function RoutingPanel({
               value={value}
               onChange={(event) => setValue(event.target.value)}
               placeholder={placeholders[type]}
+            />
+            <input
+              className="field routing-note-input"
+              value={note}
+              maxLength={200}
+              onChange={(event) => setNote(event.target.value)}
+              placeholder="Заметка — зачем это правило"
             />
             <button className="button button-ghost" disabled={!value.trim() || Boolean(busy)}>
               Добавить

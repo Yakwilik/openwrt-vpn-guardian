@@ -21,6 +21,7 @@ const (
 type RoutingRule struct {
 	Type  RoutingRuleType `json:"type"`
 	Value string          `json:"value"`
+	Note  string          `json:"note,omitempty"`
 }
 
 type RoutingRuleOption struct {
@@ -50,6 +51,7 @@ func (r Routing) Rules() ([]RoutingRule, error) {
 		if err != nil {
 			return nil, err
 		}
+		rule.Note = strings.TrimSpace(r.Notes[raw])
 		rules = append(rules, rule)
 	}
 	for _, raw := range r.ProxyIPs {
@@ -57,13 +59,14 @@ func (r Routing) Rules() ([]RoutingRule, error) {
 		if err != nil {
 			return nil, err
 		}
+		rule.Note = strings.TrimSpace(r.Notes[raw])
 		rules = append(rules, rule)
 	}
 	return rules, nil
 }
 
 func RoutingFromRules(rules []RoutingRule) (Routing, error) {
-	out := Routing{Version: Version}
+	out := Routing{Version: Version, Notes: make(map[string]string)}
 	seen := make(map[string]struct{}, len(rules))
 
 	for i, rule := range rules {
@@ -77,13 +80,38 @@ func RoutingFromRules(rules []RoutingRule) (Routing, error) {
 		}
 		seen[key] = struct{}{}
 
+		note, err := normalizeRoutingNote(rule.Note)
+		if err != nil {
+			return Routing{}, fmt.Errorf("routing rule %d: %w", i, err)
+		}
+		if note != "" {
+			out.Notes[stored] = note
+		}
+
 		if domainRule {
 			out.ProxyDomains = append(out.ProxyDomains, stored)
 		} else {
 			out.ProxyIPs = append(out.ProxyIPs, stored)
 		}
 	}
+	if len(out.Notes) == 0 {
+		out.Notes = nil
+	}
 	return out, nil
+}
+
+func normalizeRoutingNote(note string) (string, error) {
+	note = strings.TrimSpace(note)
+	if note == "" {
+		return "", nil
+	}
+	if strings.ContainsAny(note, "\r\n") {
+		return "", fmt.Errorf("note must be a single line")
+	}
+	if len([]rune(note)) > 200 {
+		return "", fmt.Errorf("note must be at most 200 characters")
+	}
+	return note, nil
 }
 
 func (r RoutingRule) storedValue() (string, bool, error) {

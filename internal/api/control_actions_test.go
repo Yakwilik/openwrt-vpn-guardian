@@ -37,8 +37,8 @@ func TestZapret2CannotBeRestartedFromDashboard(t *testing.T) {
 
 func TestMakeRoutingResponse(t *testing.T) {
 	routing, err := config.RoutingFromRules([]config.RoutingRule{
-		{Type: config.RoutingRuleDomain, Value: "jetbrains.com"},
-		{Type: config.RoutingRuleIP, Value: "203.0.113.0/24"},
+		{Type: config.RoutingRuleDomain, Value: "jetbrains.com", Note: "JetBrains updates"},
+		{Type: config.RoutingRuleIP, Value: "203.0.113.0/24", Note: "Test network"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -50,6 +50,9 @@ func TestMakeRoutingResponse(t *testing.T) {
 	}
 	if len(got.Rules) != 2 {
 		t.Fatalf("rules = %d, want 2", len(got.Rules))
+	}
+	if got.Rules[0].Note != "JetBrains updates" || got.Rules[1].Note != "Test network" {
+		t.Fatalf("notes were not preserved: %#v", got.Rules)
 	}
 	if len(got.Options) != len(config.RoutingRuleOptions()) {
 		t.Fatalf("options = %d, want %d", len(got.Options), len(config.RoutingRuleOptions()))

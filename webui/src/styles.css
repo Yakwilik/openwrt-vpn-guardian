@@ -993,6 +993,12 @@ button:disabled {
   text-transform: uppercase;
 }
 
+.routing-copy {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
 .routing-value {
   min-width: 0;
   overflow: hidden;
@@ -1002,9 +1008,23 @@ button:disabled {
   text-overflow: ellipsis;
 }
 
+.routing-note {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.routing-note-empty {
+  color: #5f737f;
+  font-style: italic;
+}
+
 .routing-add {
   display: grid;
-  grid-template-columns: 190px minmax(0, 1fr) auto;
+  grid-template-columns: 170px minmax(0, 1.1fr) minmax(0, 1.2fr) auto;
   gap: 8px;
   margin-top: 11px;
 }

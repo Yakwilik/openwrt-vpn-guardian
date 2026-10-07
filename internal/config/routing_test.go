@@ -2,14 +2,15 @@ package config
 
 import (
 	"slices"
+	"strings"
 	"testing"
 )
 
 func TestRoutingRuleRoundTrip(t *testing.T) {
 	rules := []RoutingRule{
-		{Type: RoutingRuleGeosite, Value: "openai"},
-		{Type: RoutingRuleDomain, Value: "jetbrains.com"},
-		{Type: RoutingRuleFull, Value: "download.jetbrains.com"},
+		{Type: RoutingRuleGeosite, Value: "openai", Note: "OpenAI / ChatGPT"},
+		{Type: RoutingRuleDomain, Value: "jetbrains.com", Note: "JetBrains updates"},
+		{Type: RoutingRuleFull, Value: "download.jetbrains.com", Note: "Exact download host"},
 		{Type: RoutingRuleRegexp, Value: "^cdn\\d+\\.example\\.com$"},
 		{Type: RoutingRuleIP, Value: "203.0.113.0/24"},
 		{Type: RoutingRuleGeoIP, Value: "us"},
@@ -52,5 +53,29 @@ func TestRoutingFromRulesRejectsDuplicates(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("duplicate routing rules must be rejected")
+	}
+}
+
+func TestRoutingNotesAreValidated(t *testing.T) {
+	tooLong := strings.Repeat("x", 201)
+	tests := []RoutingRule{
+		{Type: RoutingRuleDomain, Value: "example.com", Note: "line one\nline two"},
+		{Type: RoutingRuleDomain, Value: "example.com", Note: tooLong},
+	}
+	for _, rule := range tests {
+		if _, err := RoutingFromRules([]RoutingRule{rule}); err == nil {
+			t.Fatalf("expected invalid note to fail: %#v", rule)
+		}
+	}
+}
+
+func TestRoutingRejectsOrphanNote(t *testing.T) {
+	routing := Routing{
+		Version:      Version,
+		ProxyDomains: []string{"domain:example.com"},
+		Notes:        map[string]string{"domain:missing.example": "orphan"},
+	}
+	if err := routing.Validate(); err == nil {
+		t.Fatal("orphan routing note must fail validation")
 	}
 }

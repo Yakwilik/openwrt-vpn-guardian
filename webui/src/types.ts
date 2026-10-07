@@ -114,6 +114,7 @@ export interface SelectionState {
 export interface RoutingRule {
   type: "geosite" | "domain" | "full" | "regexp" | "ip" | "geoip";
   value: string;
+  note?: string;
 }
 
 export interface RoutingRuleOption {
