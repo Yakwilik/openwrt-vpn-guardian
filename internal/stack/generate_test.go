@@ -1,6 +1,7 @@
 package stack
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -104,5 +105,54 @@ func TestGeneratedFrontBypassesDNATReplies(t *testing.T) {
 	tproxy := `iifname "br-test" ip saddr 192.0.2.0/24 meta nfproto ipv4 meta l4proto { tcp, udp }`
 	if strings.Index(nft, rule) > strings.Index(nft, tproxy) {
 		t.Fatalf("DNAT bypass must run before TPROXY marking:\n%s", nft)
+	}
+}
+
+func TestGeneratedClientDNSInterception(t *testing.T) {
+	cfg := defaultStack("br-test", "192.0.2.0/24", "eth-test", "/opt/xray")
+	nft := makeNFT(cfg)
+	for _, fragment := range []string{
+		"chain dns_redirect",
+		"type nat hook prerouting priority -170",
+		`iifname "br-test" ip saddr 192.0.2.0/24 udp dport 53 redirect to :20176`,
+		`iifname "br-test" ip saddr 192.0.2.0/24 tcp dport 53 redirect to :20176`,
+		"chain dns_input",
+	} {
+		if !strings.Contains(nft, fragment) {
+			t.Fatalf("generated nft missing %q:\n%s", fragment, nft)
+		}
+	}
+	init := makeDNSInit(cfg)
+	if !strings.Contains(init, `dns-proxy`) {
+		t.Fatalf("generated DNS service is incomplete:\n%s", init)
+	}
+}
+
+func TestSystemDNSStillInterceptsClientsForLocalDispatch(t *testing.T) {
+	cfg := defaultStack("br-test", "192.0.2.0/24", "eth-test", "/opt/xray")
+	cfg.DNS.Mode = "system"
+	nft := makeNFT(cfg)
+	if !strings.Contains(nft, "chain dns_redirect") || !strings.Contains(nft, "dport 53 redirect") {
+		t.Fatalf("system DNS mode must still pass LAN DNS through Guardian dispatcher:\n%s", nft)
+	}
+}
+
+func TestDNSXrayIsIsolatedFromApplicationPolicy(t *testing.T) {
+	cfg := defaultStack("br-test", "192.0.2.0/24", "eth-test", "/opt/xray")
+	for _, mode := range []string{"killswitch", "failopen", "direct", "killswitch-blocked"} {
+		p := makePolicy(cfg, mode)
+		if _, ok := p["dns"]; ok {
+			t.Fatalf("%s application policy must not inherit VPN DNS", mode)
+		}
+		if len(p["inbounds"].([]any)) != 1 {
+			t.Fatal("application policy acquired an extra listener")
+		}
+	}
+	raw, _ := json.Marshal(makeDNSXray(cfg))
+	text := string(raw)
+	for _, part := range []string{`"tag":"dns-in"`, `"tag":"dns-query"`, `"outboundTag":"vpn-backend"`, `"protocol":"dns"`} {
+		if !strings.Contains(text, part) {
+			t.Fatalf("DNS core missing %s", part)
+		}
 	}
 }

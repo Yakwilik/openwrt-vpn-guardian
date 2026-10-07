@@ -1,6 +1,6 @@
 import type { StatusSnapshot } from "../types";
 
-const serviceOrder = ["front", "policy", "v2raya", "watchdog", "collector", "api"];
+const serviceOrder = ["front", "policy", "dns", "v2raya", "watchdog", "collector", "api"];
 
 interface ServicesPanelProps {
   status?: StatusSnapshot;
@@ -30,9 +30,10 @@ export function ServicesPanel({
         {serviceOrder.map((name) => {
           const value = status?.services?.[name] || "unknown";
           const running = value === "running";
+          const disabled = value === "disabled";
           return (
             <div className="service-card" key={name}>
-              <span className={`mini-dot ${running ? "is-up" : "is-down"}`} />
+              <span className={`mini-dot ${running ? "is-up" : disabled ? "" : "is-down"}`} />
               <span>{name}</span>
               <strong>{value}</strong>
             </div>

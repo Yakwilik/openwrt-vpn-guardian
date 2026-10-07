@@ -34,6 +34,9 @@ export function StatusOverview({ status }: StatusOverviewProps) {
             <span className={`badge ${status.fallback_direct ? "badge-warn" : ""}`}>
               {status.fallback_direct ? "fallback direct" : "interception active"}
             </span>
+            <span className={`badge ${status.dns_healthy ? "" : "badge-warn"}`}>
+              DNS {status.dns_mode || "—"}{status.dns_healthy ? "" : " · fault"}
+            </span>
           </div>
         )}
       </section>

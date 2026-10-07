@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -23,12 +24,15 @@ import (
 )
 
 const (
-	testPolicyPort      = 20178
-	testFrontPort       = 20179
+	testPolicyPort      = 29178
+	testFrontPort       = 29179
 	testDeadBackendPort = 29999
 )
 
 var homeIP string
+var isolatedDirectURL, isolatedProxyURL string
+
+const isolatedIP = "192.0.2.9"
 
 type Check struct {
 	Name   string `json:"name"`
@@ -149,9 +153,56 @@ func runStaticChecks(rep *Report, cfg config.Stack) {
 		ok, out := cmdOK("/etc/init.d/"+svc, "status")
 		add(rep, "service "+svc, ok && strings.Contains(out, "running"), out)
 	}
+	{
+		ok, out := cmdOK(paths.DNSServiceInit, "status")
+		add(rep, "service vpn-guardian-dns", ok && strings.Contains(out, "running"), out)
+		if cfg.DNS.Mode == config.DNSModeXray {
+			conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", cfg.DNS.XrayPort), time.Second)
+			if err == nil {
+				_ = conn.Close()
+			}
+			add(rep, "Xray DNS listener", err == nil, fmt.Sprintf("127.0.0.1:%d err=%v", cfg.DNS.XrayPort, err))
+		}
+		dnsOK, detail := probeClientDNS(cfg.DNS.ListenPort)
+		add(rep, "client DNS through policy", dnsOK, detail)
+	}
 
 	testJSONAPI(rep, "status", "http://127.0.0.1:20175/api/status")
 	testJSONAPI(rep, "control", "http://127.0.0.1:20175/api/control")
+}
+
+func probeClientDNS(port int) (bool, string) {
+	conn, err := net.DialTimeout("udp4", fmt.Sprintf("127.0.0.1:%d", port), time.Second)
+	if err != nil {
+		return false, err.Error()
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(6 * time.Second))
+
+	// Fixed transaction ID, one A question for example.com. This talks to the
+	// Guardian listener directly and never consults the router/system resolver.
+	query := []byte{
+		0x47, 0x44, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00, 0x07, 'e', 'x', 'a', 'm', 'p', 'l', 'e',
+		0x03, 'c', 'o', 'm', 0x00, 0x00, 0x01, 0x00, 0x01,
+	}
+	if _, err := conn.Write(query); err != nil {
+		return false, err.Error()
+	}
+	buf := make([]byte, 4096)
+	n, err := conn.Read(buf)
+	if err != nil {
+		return false, err.Error()
+	}
+	if n < 12 || buf[0] != query[0] || buf[1] != query[1] || buf[2]&0x80 == 0 {
+		return false, fmt.Sprintf("invalid DNS response: bytes=%d", n)
+	}
+	rcode := buf[3] & 0x0f
+	answers := int(buf[6])<<8 | int(buf[7])
+	if rcode != 0 || answers == 0 {
+		return false, fmt.Sprintf("rcode=%d answers=%d", rcode, answers)
+	}
+	return true, fmt.Sprintf("rcode=%d answers=%d", rcode, answers)
 }
 func testJSONAPI(rep *Report, name, url string) {
 	req, _ := http.NewRequest(http.MethodGet, url, nil)
@@ -234,6 +285,11 @@ func fetchViaSocks(socksAddr, url string, timeout time.Duration) ([]byte, error)
 	return io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 }
 func runIsolatedPolicyTests(rep *Report, tmpDir, assetsDir string) error {
+	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprintln(w, isolatedIP) }))
+	defer endpoint.Close()
+	isolatedDirectURL = endpoint.URL
+	isolatedProxyURL = strings.Replace(endpoint.URL, "127.0.0.1", "localhost", 1)
+
 	frontCfg, err := loadJSON(paths.FrontConfig)
 	if err != nil {
 		return err
@@ -351,7 +407,7 @@ func prepareFront(cfg map[string]any) {
 		"rules": []any{
 			map[string]any{
 				"type":        "field",
-				"domain":      []string{"domain:api.ipify.org"},
+				"domain":      []string{"full:localhost"},
 				"outboundTag": "policy-gateway",
 			},
 			map[string]any{
@@ -364,64 +420,80 @@ func prepareFront(cfg map[string]any) {
 }
 
 func preparePolicy(cfg map[string]any) {
+	if obs, ok := cfg["observatory"].(map[string]any); ok {
+		obs["probeUrl"] = isolatedDirectURL
+		obs["probeInterval"] = "1s"
+	}
+
 	inbounds, _ := cfg["inbounds"].([]any)
+	keptInbounds := make([]any, 0, 1)
 	for _, raw := range inbounds {
 		m, _ := raw.(map[string]any)
-		if fmt.Sprint(m["tag"]) == "policy-socks" {
-			m["port"] = testPolicyPort
-		}
-	}
-	outbounds, _ := cfg["outbounds"].([]any)
-	for _, raw := range outbounds {
-		m, _ := raw.(map[string]any)
-		if fmt.Sprint(m["tag"]) != "vpn-backend" {
+		if fmt.Sprint(m["tag"]) != "policy-socks" {
 			continue
 		}
-		settings, _ := m["settings"].(map[string]any)
-		servers, _ := settings["servers"].([]any)
-		if len(servers) > 0 {
-			s, _ := servers[0].(map[string]any)
-			s["port"] = testDeadBackendPort
-		}
+		m["port"] = testPolicyPort
+		keptInbounds = append(keptInbounds, m)
 	}
+	cfg["inbounds"] = keptInbounds
+	delete(cfg, "dns")
+
+	outbounds, _ := cfg["outbounds"].([]any)
+	keptOutbounds := make([]any, 0, len(outbounds))
+	for _, raw := range outbounds {
+		m, _ := raw.(map[string]any)
+		if fmt.Sprint(m["tag"]) == "dns-out" {
+			continue
+		}
+		if fmt.Sprint(m["tag"]) == "vpn-backend" {
+			settings, _ := m["settings"].(map[string]any)
+			servers, _ := settings["servers"].([]any)
+			if len(servers) > 0 {
+				s, _ := servers[0].(map[string]any)
+				s["port"] = testDeadBackendPort
+			}
+		}
+		keptOutbounds = append(keptOutbounds, m)
+	}
+	cfg["outbounds"] = keptOutbounds
 }
 func runFailopenChecks(rep *Report) {
-	direct, err := fetchIPViaSocks("127.0.0.1:20179", "https://icanhazip.com", 4*time.Second)
-	add(rep, "failopen direct stays home", err == nil && direct == homeIP,
+	direct, err := fetchIPViaSocks("127.0.0.1:29179", isolatedDirectURL, 4*time.Second)
+	add(rep, "failopen direct stays home", err == nil && direct == isolatedIP,
 		fmt.Sprintf("ip=%s err=%v", direct, err))
 
 	deadline := time.Now().Add(15 * time.Second)
 	var ip string
 	for time.Now().Before(deadline) {
-		ip, err = fetchIPViaSocks("127.0.0.1:20179", "https://api.ipify.org", 4*time.Second)
-		if err == nil && ip == homeIP {
+		ip, err = fetchIPViaSocks("127.0.0.1:29179", isolatedProxyURL, 4*time.Second)
+		if err == nil && ip == isolatedIP {
 			break
 		}
 		time.Sleep(time.Second)
 	}
-	add(rep, "failopen proxy falls back direct", err == nil && ip == homeIP,
+	add(rep, "failopen proxy falls back direct", err == nil && ip == isolatedIP,
 		fmt.Sprintf("ip=%s err=%v", ip, err))
 }
 
 func runVPNOnlyChecks(rep *Report) {
-	direct, err := fetchIPViaSocks("127.0.0.1:20179", "https://icanhazip.com", 4*time.Second)
-	add(rep, "vpn-only direct stays home with dead backend", err == nil && direct == homeIP,
+	direct, err := fetchIPViaSocks("127.0.0.1:29179", isolatedDirectURL, 4*time.Second)
+	add(rep, "vpn-only direct stays home with dead backend", err == nil && direct == isolatedIP,
 		fmt.Sprintf("ip=%s err=%v", direct, err))
 
 	start := time.Now()
-	ip, err := fetchIPViaSocks("127.0.0.1:20179", "https://api.ipify.org", 4*time.Second)
+	ip, err := fetchIPViaSocks("127.0.0.1:29179", isolatedProxyURL, 4*time.Second)
 	dur := time.Since(start)
-	add(rep, "vpn-only proxy fails closed without direct fallback", err != nil && ip != homeIP,
+	add(rep, "vpn-only proxy fails closed without direct fallback", err != nil && ip != isolatedIP,
 		fmt.Sprintf("ip=%s failed_in=%s err=%v", ip, dur.Round(time.Millisecond), err))
 }
 
 func runBlockedChecks(rep *Report) {
-	direct, err := fetchIPViaSocks("127.0.0.1:20179", "https://icanhazip.com", 4*time.Second)
-	add(rep, "emergency block direct stays home", err == nil && direct == homeIP,
+	direct, err := fetchIPViaSocks("127.0.0.1:29179", isolatedDirectURL, 4*time.Second)
+	add(rep, "emergency block direct stays home", err == nil && direct == isolatedIP,
 		fmt.Sprintf("ip=%s err=%v", direct, err))
 
 	start := time.Now()
-	_, err = fetchIPViaSocks("127.0.0.1:20179", "https://api.ipify.org", 2*time.Second)
+	_, err = fetchIPViaSocks("127.0.0.1:29179", isolatedProxyURL, 2*time.Second)
 	dur := time.Since(start)
 	add(rep, "emergency block rejects proxy class", err != nil && dur < 1500*time.Millisecond,
 		fmt.Sprintf("blocked_in=%s err=%v", dur.Round(time.Millisecond), err))

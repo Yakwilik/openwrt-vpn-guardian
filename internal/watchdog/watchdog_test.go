@@ -292,3 +292,12 @@ func healthResultWithCodes(codes map[string]int) HealthResult {
 	classifyHealth(&result)
 	return result
 }
+
+func TestAlternativeExcludesCurrentIdentityEvenWithReindexedTouch(t *testing.T) {
+	current := Candidate{Key: "stable", TouchID: 2, Sub: 1}
+	ready := []RankedCandidate{{Candidate: Candidate{Key: "stable", TouchID: 9, Sub: 1}}, {Candidate: Candidate{Key: "another", TouchID: 3, Sub: 1}}}
+	got := alternativeCandidates(current, ready)
+	if len(got) != 1 || got[0].Key != "another" {
+		t.Fatalf("current identity was not excluded: %#v", got)
+	}
+}

@@ -27,6 +27,17 @@ export function TrafficPath({ status }: TrafficPathProps) {
           healthy={frontReady && backendReady}
           steps={["LAN", "vpn-front", "vpn-policy", "v2rayA", "VPN node"]}
         />
+        <Route
+          label="DNS"
+          healthy={Boolean(status?.dns_healthy)}
+          steps={
+            status?.dns_mode === "system"
+              ? ["LAN", "vpn-guardian-dns", "dnsmasq", "WAN resolver"]
+              : status?.dns_mode === "xray"
+                ? ["LAN", "DNS dispatcher", "Xray DNS", "VPN backend"]
+                : ["LAN", "DNS dispatcher", "VPN backend", "custom resolver"]
+          }
+        />
       </div>
 
       <div className="technical-strip">
@@ -35,6 +46,10 @@ export function TrafficPath({ status }: TrafficPathProps) {
         <State label="Route table" ok={Boolean(status?.tproxy?.route)} />
         <State label="Front listener" ok={Boolean(status?.tproxy?.front_port)} />
         <State label="Backend SOCKS" ok={Boolean(status?.tproxy?.backend_socks)} />
+        <State
+          label={`DNS ${status?.dns_mode || "—"}`}
+          ok={Boolean(status?.dns_healthy)}
+        />
       </div>
     </section>
   );

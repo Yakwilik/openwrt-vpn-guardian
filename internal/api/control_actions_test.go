@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"slices"
 	"testing"
 
@@ -56,5 +57,29 @@ func TestMakeRoutingResponse(t *testing.T) {
 	}
 	if len(got.Options) != len(config.RoutingRuleOptions()) {
 		t.Fatalf("options = %d, want %d", len(got.Options), len(config.RoutingRuleOptions()))
+	}
+}
+
+func TestDNSControlJSONContract(t *testing.T) {
+	body := []byte(`{"action":"dns","dnsMode":"custom","dnsResolvers":["1.1.1.1","9.9.9.9"]}`)
+	var req controlRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		t.Fatal(err)
+	}
+	if req.DNSMode != "custom" || !slices.Equal(req.DNSResolvers, []string{"1.1.1.1", "9.9.9.9"}) {
+		t.Fatalf("decoded DNS request = %#v", req)
+	}
+	encoded, err := json.Marshal(controlResponse{OK: true, DNS: dnsResponse{Mode: "custom", Resolvers: req.DNSResolvers}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var response struct {
+		DNS dnsResponse `json:"dns"`
+	}
+	if err := json.Unmarshal(encoded, &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.DNS.Mode != "custom" || !slices.Equal(response.DNS.Resolvers, req.DNSResolvers) {
+		t.Fatalf("encoded DNS response = %#v", response.DNS)
 	}
 }

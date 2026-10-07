@@ -33,18 +33,22 @@ type session struct {
 }
 
 type controlRequest struct {
-	Action     string               `json:"action"`
-	PIN        string               `json:"pin,omitempty"`
-	Enabled    bool                 `json:"enabled,omitempty"`
-	ID         int                  `json:"id,omitempty"`
-	Sub        int                  `json:"sub,omitempty"`
-	URL        string               `json:"url,omitempty"`
-	Remarks    string               `json:"remarks,omitempty"`
-	AutoSelect bool                 `json:"autoSelect,omitempty"`
-	Confirm    string               `json:"confirm,omitempty"`
-	Service    string               `json:"service,omitempty"`
-	Transports []config.Transport   `json:"transports,omitempty"`
-	Rules      []config.RoutingRule `json:"rules,omitempty"`
+	NodeKey             string               `json:"nodeKey,omitempty"`
+	Action              string               `json:"action"`
+	PIN                 string               `json:"pin,omitempty"`
+	Enabled             bool                 `json:"enabled,omitempty"`
+	ID                  int                  `json:"id,omitempty"`
+	Sub                 int                  `json:"sub,omitempty"`
+	URL                 string               `json:"url,omitempty"`
+	Remarks             string               `json:"remarks,omitempty"`
+	AutoSelect          bool                 `json:"autoSelect,omitempty"`
+	Confirm             string               `json:"confirm,omitempty"`
+	Service             string               `json:"service,omitempty"`
+	Transports          []config.Transport   `json:"transports,omitempty"`
+	Rules               []config.RoutingRule `json:"rules,omitempty"`
+	DNSMode             string               `json:"dnsMode,omitempty"`
+	DNSOnlyProxyDomains *bool                `json:"dnsOnlyProxyDomains,omitempty"`
+	DNSResolvers        []string             `json:"dnsResolvers,omitempty"`
 }
 
 type transportOptionResponse struct {
@@ -67,6 +71,12 @@ type routingResponse struct {
 	Options []routingRuleOptionResponse `json:"options"`
 }
 
+type dnsResponse struct {
+	OnlyProxyDomains bool     `json:"onlyProxyDomains"`
+	Mode             string   `json:"mode"`
+	Resolvers        []string `json:"resolvers"`
+}
+
 type controlResponse struct {
 	OK             bool                       `json:"ok"`
 	Authenticated  bool                       `json:"authenticated"`
@@ -82,6 +92,7 @@ type controlResponse struct {
 	PolicyMode     string                     `json:"policyMode"`
 	Selection      selectionResponse          `json:"selection"`
 	Routing        routingResponse            `json:"routing"`
+	DNS            dnsResponse                `json:"dns"`
 	Result         string                     `json:"result,omitempty"`
 	Message        string                     `json:"message,omitempty"`
 	Error          string                     `json:"error,omitempty"`
@@ -273,6 +284,11 @@ func makeControlResponse(authenticated, configured bool) (controlResponse, error
 		PolicyMode:     snap.PolicyMode,
 		Selection:      selection,
 		Routing:        routingState,
+		DNS: dnsResponse{
+			OnlyProxyDomains: stack.DNS.ProxyOnly(),
+			Mode:             stack.DNS.Mode,
+			Resolvers:        append([]string(nil), stack.DNS.Resolvers...),
+		},
 	}, nil
 }
 

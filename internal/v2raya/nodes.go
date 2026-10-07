@@ -2,6 +2,7 @@ package v2raya
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -14,6 +15,7 @@ import (
 // TouchID and Sub address v2rayA's one-based node and zero-based subscription
 // positions; SubscriptionID is the stable database identifier.
 type Candidate struct {
+	Key            string `json:"key"`
 	TouchID        int    `json:"id"`
 	Sub            int    `json:"sub"`
 	SubscriptionID int    `json:"subscriptionId"`
@@ -51,6 +53,7 @@ func ListCandidates(ctx context.Context, db *sql.DB, policy CandidatePolicy) ([]
 	defer rows.Close()
 
 	var out []Candidate
+	positions := map[int]int{}
 	for rows.Next() {
 		var subID sql.NullInt64
 		var position int
@@ -62,13 +65,16 @@ func ListCandidates(ctx context.Context, db *sql.DB, policy CandidatePolicy) ([]
 		if !subID.Valid || !exists || position < 0 {
 			continue
 		}
+		touchID := positions[int(subID.Int64)] + 1
+		positions[int(subID.Int64)] = touchID
 		node, valid := parseCandidate(raw, position, policy)
 		if !valid {
 			continue
 		}
-		node.TouchID = position + 1
+		node.TouchID = touchID
 		node.Sub = sub
 		node.SubscriptionID = int(subID.Int64)
+		node.Key = stableNodeKey(node.SubscriptionID, raw)
 		out = append(out, node)
 	}
 	if err := rows.Err(); err != nil {
@@ -170,4 +176,28 @@ func ConnectedTouch(ctx context.Context, db *sql.DB) (NodeTouch, bool, error) {
 		return NodeTouch{}, false, errors.New("connected node must have a positive id and nonnegative sub")
 	}
 	return touch, true, nil
+}
+
+// Key is a digest of the connection identity, never the credentials themselves.
+// Positions and subscription order change on refresh and are not identities.
+func stableNodeKey(sub int, raw string) string {
+	var obj map[string]any
+	if json.Unmarshal([]byte(raw), &obj) != nil {
+		return ""
+	}
+	if nested, ok := obj["serverObj"].(map[string]any); ok {
+		obj = nested
+	}
+	for _, k := range []string{"ps", "name", "remarks", "pingLatency", "latency", "_type", "sub", "selected", "status"} {
+		delete(obj, k)
+	}
+	b, _ := json.Marshal(obj)
+	sum := sha256.Sum256(b)
+	return fmt.Sprintf("%d:%x", sub, sum)
+}
+func SameCandidate(a, b Candidate) bool {
+	if a.Key != "" && b.Key != "" {
+		return a.Key == b.Key
+	}
+	return a.SubscriptionID == b.SubscriptionID && a.Name == b.Name && a.Protocol == b.Protocol && a.Network == b.Network && a.Security == b.Security && a.Address == b.Address
 }

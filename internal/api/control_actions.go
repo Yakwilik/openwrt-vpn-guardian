@@ -35,12 +35,14 @@ func executeControlAction(req controlRequest) (string, error) {
 		if req.ID <= 0 {
 			return "", errors.New("node id required")
 		}
-		return "", control.SwitchFront(req.ID, req.Sub)
+		return "", control.SwitchFront(req.ID, req.Sub, req.NodeKey)
 	case "pin":
 		if req.ID <= 0 {
 			return "", errors.New("node id required")
 		}
-		return "", control.PinFront(req.ID, req.Sub)
+		return "", control.PinFront(req.ID, req.Sub, req.NodeKey)
+	case "reselect":
+		return control.ReselectFront()
 	case "latency":
 		x, err := control.TestLatency()
 		if err != nil {
@@ -78,6 +80,8 @@ func executeControlAction(req controlRequest) (string, error) {
 			return "", err
 		}
 		return "", stackruntime.ApplyRouting(routing)
+	case "dns":
+		return "", stackruntime.ApplyDNS(req.DNSMode, req.DNSResolvers, req.DNSOnlyProxyDomains)
 	case "repair":
 		ready, err := v2rayautil.RepairBackendListener(true)
 		if err != nil {

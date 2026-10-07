@@ -16,6 +16,16 @@
     "socksPort": 20173,
     "watchdogInterval": "10s"
   },
+  "dns": {
+    "onlyProxyDomains": true,
+    "mode": "custom",
+    "listenPort": 20176,
+    "xrayPort": 20178,
+    "resolvers": [
+      "1.1.1.1",
+      "9.9.9.9"
+    ]
+  },
   "dashboard": {
     "collectorInterval": "3s"
   },

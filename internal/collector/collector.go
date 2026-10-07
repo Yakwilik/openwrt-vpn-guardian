@@ -65,6 +65,7 @@ type ServiceStatus struct {
 	V2rayA    string `json:"v2raya"`
 	Front     string `json:"front"`
 	Policy    string `json:"policy"`
+	DNS       string `json:"dns"`
 	Watchdog  string `json:"watchdog"`
 	Collector string `json:"collector"`
 	API       string `json:"api"`
@@ -85,37 +86,46 @@ type HealthBrief struct {
 }
 
 type Status struct {
-	Now                int64                  `json:"now"`
-	Overall            string                 `json:"overall"`
-	Architecture       string                 `json:"architecture"`
-	ControlMode        string                 `json:"control_mode"`
-	FailurePolicy      string                 `json:"failure_policy"`
-	PolicyMode         string                 `json:"policy_mode"`
-	PolicyRuntime      string                 `json:"policy_runtime"`
-	Node               string                 `json:"node"`
-	Protocol           string                 `json:"protocol"`
-	Endpoint           string                 `json:"endpoint"`
-	EgressIP           string                 `json:"vpn_ip"`
-	HomeIP             string                 `json:"home_ip"`
-	Transparent        string                 `json:"transparent"`
-	PACMode            string                 `json:"pac_mode"`
-	DesiredTransparent string                 `json:"desired_transparent"`
-	TProxyActive       bool                   `json:"tproxy_active"`
-	FallbackDirect     bool                   `json:"fallback_direct"`
-	Failures           int                    `json:"failures"`
-	LastSwitch         int64                  `json:"last_switch"`
-	LastFailedNode     string                 `json:"last_failed_node"`
-	LastFailedAt       int64                  `json:"last_failed_at"`
-	Candidates         int                    `json:"candidates"`
-	NodesTotal         int                    `json:"nodes_total"`
-	Services           ServiceStatus          `json:"services"`
-	TProxy             TProxyStatus           `json:"tproxy"`
-	HealthCount        int                    `json:"health_count"`
-	HealthStatus       string                 `json:"health_status"`
-	Health             map[string]HealthBrief `json:"health"`
-	Events             []string               `json:"events,omitempty"`
+	DNSHealthy          bool                   `json:"dns_healthy"`
+	DNSOnlyProxyDomains bool                   `json:"dns_only_proxy_domains"`
+	DNSChecks           map[string]DNSCheck    `json:"dns_checks"`
+	Now                 int64                  `json:"now"`
+	Overall             string                 `json:"overall"`
+	Architecture        string                 `json:"architecture"`
+	ControlMode         string                 `json:"control_mode"`
+	FailurePolicy       string                 `json:"failure_policy"`
+	PolicyMode          string                 `json:"policy_mode"`
+	PolicyRuntime       string                 `json:"policy_runtime"`
+	Node                string                 `json:"node"`
+	Protocol            string                 `json:"protocol"`
+	Endpoint            string                 `json:"endpoint"`
+	EgressIP            string                 `json:"vpn_ip"`
+	HomeIP              string                 `json:"home_ip"`
+	Transparent         string                 `json:"transparent"`
+	PACMode             string                 `json:"pac_mode"`
+	DesiredTransparent  string                 `json:"desired_transparent"`
+	TProxyActive        bool                   `json:"tproxy_active"`
+	DNSMode             string                 `json:"dns_mode"`
+	DNSReady            bool                   `json:"dns_ready"`
+	DNSIntercept        bool                   `json:"dns_intercept"`
+	FallbackDirect      bool                   `json:"fallback_direct"`
+	Failures            int                    `json:"failures"`
+	LastSwitch          int64                  `json:"last_switch"`
+	LastFailedNode      string                 `json:"last_failed_node"`
+	LastFailedAt        int64                  `json:"last_failed_at"`
+	Candidates          int                    `json:"candidates"`
+	NodesTotal          int                    `json:"nodes_total"`
+	Services            ServiceStatus          `json:"services"`
+	TProxy              TProxyStatus           `json:"tproxy"`
+	HealthCount         int                    `json:"health_count"`
+	HealthStatus        string                 `json:"health_status"`
+	Health              map[string]HealthBrief `json:"health"`
+	Events              []string               `json:"events,omitempty"`
 }
 type runtimeState struct {
+	lastDNSAt    time.Time
+	lastDNSKey   string
+	dnsChecks    map[string]DNSCheck
 	lastEgressAt time.Time
 	lastEgress   string
 	lastHomeAt   time.Time
@@ -230,6 +240,15 @@ func collectSnapshot(rt *runtimeState) (Status, error) {
 		Collector: serviceState("vpn-dashboard-collector"),
 		API:       serviceState("vpn-guardian-api"),
 	}
+	out.DNSMode = stack.DNS.Mode
+	out.Services.DNS = serviceState("vpn-guardian-dns")
+	out.DNSIntercept = commandContains("nft", []string{"list", "table", "inet", "vpn_front"}, "chain dns_redirect")
+	out.DNSReady = out.Services.DNS == "running" &&
+		portReady(fmt.Sprintf("127.0.0.1:%d", stack.DNS.ListenPort)) &&
+		out.DNSIntercept
+	if stack.DNS.Mode == config.DNSModeXray {
+		out.DNSReady = out.DNSReady && portReady(fmt.Sprintf("127.0.0.1:%d", stack.DNS.XrayPort))
+	}
 	out.TProxy = inspectTProxy(stack)
 	out.TProxyActive = out.TProxy.NFT && out.TProxy.Policy && out.TProxy.Route && out.TProxy.FrontPort
 
@@ -250,7 +269,19 @@ func collectSnapshot(rt *runtimeState) (Status, error) {
 	out.EgressIP = rt.lastEgress
 
 	out.FallbackDirect = ctrl.FailurePolicy == "failopen" && state.LastHealth.Status == "down"
-	out.Overall = overallStatus(ctrl, state.LastHealth, out.TProxyActive)
+	out.DNSOnlyProxyDomains = stack.DNS.ProxyOnly()
+	key := dnsConfigKey(stack)
+	if rt.lastDNSKey != key || time.Since(rt.lastDNSAt) > 15*time.Second {
+		rt.dnsChecks = checkDNS(stack)
+		rt.lastDNSAt = time.Now()
+		rt.lastDNSKey = key
+	}
+	out.DNSChecks = rt.dnsChecks
+	out.DNSHealthy = out.DNSReady && dnsChecksHealthy(out.DNSChecks)
+	out.Overall = overallStatus(ctrl, state.LastHealth, out.TProxyActive, out.DNSReady)
+	if !out.DNSHealthy && out.Overall != "down" {
+		out.Overall = "degraded"
+	}
 	return out, nil
 }
 func dbStatus(db *sql.DB, selection v2rayautil.CandidatePolicy) (node, protocol, endpoint string, candidates, total int, transparent, pacMode string, err error) {
@@ -349,12 +380,12 @@ func field(m map[string]any, keys ...string) string {
 	return ""
 }
 
-func overallStatus(ctrl Control, health HealthResult, frontOK bool) string {
+func overallStatus(ctrl Control, health HealthResult, frontOK, dnsOK bool) string {
+	if !frontOK || !dnsOK {
+		return "down"
+	}
 	if ctrl.Mode == "direct" {
 		return "direct"
-	}
-	if !frontOK {
-		return "down"
 	}
 	switch health.Status {
 	case "down":

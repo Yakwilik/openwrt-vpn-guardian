@@ -8,6 +8,7 @@ import (
 	"github.com/Yakwilik/openwrt-vpn-guardian/internal/api"
 	"github.com/Yakwilik/openwrt-vpn-guardian/internal/collector"
 	"github.com/Yakwilik/openwrt-vpn-guardian/internal/control"
+	"github.com/Yakwilik/openwrt-vpn-guardian/internal/dnsproxy"
 	"github.com/Yakwilik/openwrt-vpn-guardian/internal/selftest"
 	"github.com/Yakwilik/openwrt-vpn-guardian/internal/stack"
 	"github.com/Yakwilik/openwrt-vpn-guardian/internal/watchdog"
@@ -48,6 +49,13 @@ func run(args []string) error {
 	case "collector":
 		collector.Run(commandArgs)
 		return nil
+	case "dns-install":
+		if len(commandArgs) != 0 {
+			return errors.New("dns-install accepts no arguments")
+		}
+		return stack.InstallDNSRuntime()
+	case "dns-proxy":
+		return dnsproxy.Run(commandArgs)
 	case "api-server":
 		return api.Serve(commandArgs)
 	case "api-key":
@@ -71,6 +79,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  vpn-guardian watchdog [flags]")
 	fmt.Fprintln(os.Stderr, "  vpn-guardian control [flags]")
 	fmt.Fprintln(os.Stderr, "  vpn-guardian collector -mode collect -interval 3s")
+	fmt.Fprintln(os.Stderr, "  vpn-guardian dns-proxy")
 	fmt.Fprintln(os.Stderr, "  vpn-guardian api-server [-listen 0.0.0.0:20175]")
 	fmt.Fprintln(os.Stderr, "  vpn-guardian api-key create --output <file>|revoke|status")
 }

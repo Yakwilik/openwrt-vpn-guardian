@@ -31,6 +31,12 @@ export interface StatusSnapshot {
   pac_mode: string;
   desired_transparent: string;
   tproxy_active: boolean;
+  dns_mode: string;
+  dns_ready: boolean;
+ dns_healthy: boolean;
+ dns_only_proxy_domains: boolean;
+ dns_checks: Record<string, {name: string; ok: boolean; rcode: string; ms: number; error?: string}>;
+  dns_intercept: boolean;
   fallback_direct: boolean;
   failures: number;
   last_switch: number;
@@ -79,6 +85,7 @@ export interface ActiveNode {
 }
 
 export interface NodeInfo {
+ key: string;
   id: number;
   sub: number;
   subscriptionId: number;
@@ -127,6 +134,14 @@ export interface RoutingState {
   options: RoutingRuleOption[];
 }
 
+export type DNSMode = "system" | "custom" | "xray";
+
+export interface DNSState {
+ onlyProxyDomains: boolean;
+  mode: DNSMode | string;
+  resolvers: string[];
+}
+
 export interface ControlResponse {
   ok: boolean;
   authenticated: boolean;
@@ -142,6 +157,7 @@ export interface ControlResponse {
   policyMode: string;
   selection: SelectionState;
   routing: RoutingState;
+  dns: DNSState;
   result?: string;
   message?: string;
   error?: string;

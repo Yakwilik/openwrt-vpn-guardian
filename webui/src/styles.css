@@ -1041,6 +1041,29 @@ button:disabled {
   max-width: 620px;
 }
 
+.dns-settings {
+  display: grid;
+  grid-template-columns: minmax(260px, 0.9fr) minmax(320px, 1.1fr);
+  gap: 10px;
+}
+
+.dns-resolvers-field {
+  min-height: 104px;
+  padding-top: 10px;
+  padding-bottom: 10px;
+  resize: vertical;
+  line-height: 1.5;
+}
+
+.dns-mode-selector {
+  flex-wrap: wrap;
+}
+
+.dns-local-note {
+  margin-top: 10px;
+  padding: 0 2px;
+}
+
 .services-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1320,6 +1343,10 @@ button:disabled {
     grid-template-columns: 1fr;
   }
 
+  .dns-settings {
+    grid-template-columns: 1fr;
+  }
+
   .routing-row {
     grid-template-columns: 78px minmax(0, 1fr);
   }
@@ -1378,3 +1405,6 @@ button:disabled {
     font-size: 30px;
   }
 }
+
+.dns-health-list { display: grid; gap: 8px; margin-bottom: 12px; }
+.dns-scope-toggle { margin-top: 14px; align-items: center; }

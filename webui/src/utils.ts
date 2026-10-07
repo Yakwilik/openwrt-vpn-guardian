@@ -40,9 +40,11 @@ export function statusTone(overall?: string): "ok" | "warn" | "down" {
 
 export function statusHeadline(status?: StatusSnapshot): string {
   if (!status) return "Получаю состояние";
+  if (status.dns_ready && status.dns_healthy === false) return "Ошибка разрешения DNS";
   if (status.overall === "ok" && status.tproxy_active) return "VPN работает";
   if (status.overall === "degraded") return "VPN работает нестабильно";
   if (!status.tproxy_active) return "VPN front недоступен";
+  if (!status.dns_ready) return "DNS клиентов недоступен";
   return "VPN backend недоступен";
 }
 

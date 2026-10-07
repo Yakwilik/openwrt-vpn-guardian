@@ -4,8 +4,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -22,6 +25,7 @@ type Stack struct {
 	AssetsDir    string    `json:"assetsDir"`
 	Front        Front     `json:"front"`
 	Backend      Backend   `json:"backend"`
+	DNS          ClientDNS `json:"dns"`
 	Dashboard    Dashboard `json:"dashboard"`
 	Policy       Policy    `json:"policy"`
 	Selection    Selection `json:"selection"`
@@ -40,6 +44,92 @@ type Front struct {
 type Backend struct {
 	SocksPort        int    `json:"socksPort"`
 	WatchdogInterval string `json:"watchdogInterval"`
+}
+
+const (
+	DNSModeSystem    = "system"
+	DNSModeCustom    = "custom"
+	DNSModeXray      = "xray"
+	legacyDNSModeVPN = "vpn"
+)
+
+type ClientDNS struct {
+	OnlyProxyDomains *bool    `json:"onlyProxyDomains,omitempty"`
+	Mode             string   `json:"mode"`
+	ListenPort       int      `json:"listenPort"`
+	XrayPort         int      `json:"xrayPort"`
+	Resolvers        []string `json:"resolvers"`
+}
+
+func (d ClientDNS) ProxyOnly() bool { return d.OnlyProxyDomains == nil || *d.OnlyProxyDomains }
+
+func DefaultClientDNS() ClientDNS {
+	onlyProxy := true
+	return ClientDNS{
+		OnlyProxyDomains: &onlyProxy,
+		Mode:             DNSModeCustom,
+		ListenPort:       20176,
+		XrayPort:         20178,
+		Resolvers:        []string{"1.1.1.1", "9.9.9.9"},
+	}
+}
+
+func XrayDNSServers() []string {
+	return []string{"tcp://1.1.1.1:53", "tcp://9.9.9.9:53"}
+}
+
+// NormalizeStack fills fields added to the v1 manifest after its initial
+// release. Existing manifests stay valid without weakening validation of
+// fields that have always been required.
+func NormalizeStack(s Stack) Stack {
+	defaults := DefaultClientDNS()
+	if strings.TrimSpace(s.DNS.Mode) == "" {
+		s.DNS.Mode = defaults.Mode
+	}
+	if s.DNS.Mode == legacyDNSModeVPN {
+		s.DNS.Mode = DNSModeCustom
+	}
+	if s.DNS.ListenPort == 0 {
+		s.DNS.ListenPort = defaults.ListenPort
+	}
+	if s.DNS.XrayPort == 0 {
+		s.DNS.XrayPort = defaults.XrayPort
+	}
+	if s.DNS.Resolvers == nil {
+		s.DNS.Resolvers = append([]string(nil), defaults.Resolvers...)
+	}
+	return s
+}
+
+// DNSResolverEndpoint validates a resolver without performing DNS itself.
+// Hostnames are deliberately rejected so the client-DNS path can never create
+// a recursive dependency on router/system DNS.
+func DNSResolverEndpoint(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", errors.New("DNS resolver must not be empty")
+	}
+	port := 53
+	if addr, err := netip.ParseAddr(value); err == nil {
+		if !addr.Is4() {
+			return "", fmt.Errorf("DNS resolver %q must be an IPv4 address", value)
+		}
+		return net.JoinHostPort(addr.String(), strconv.Itoa(port)), nil
+	}
+
+	parsedHost, parsedPort, err := net.SplitHostPort(value)
+	if err != nil {
+		return "", fmt.Errorf("DNS resolver %q must be a numeric IPv4 address with optional port", value)
+	}
+	addr, err := netip.ParseAddr(parsedHost)
+	if err != nil || !addr.Is4() {
+		return "", fmt.Errorf("DNS resolver %q must use a numeric IPv4 address", value)
+	}
+	port64, err := strconv.ParseUint(parsedPort, 10, 16)
+	if err != nil || port64 == 0 {
+		return "", fmt.Errorf("DNS resolver %q has an invalid port", value)
+	}
+	return net.JoinHostPort(addr.String(), strconv.Itoa(int(port64))), nil
 }
 
 type Dashboard struct {
@@ -78,6 +168,7 @@ func DefaultStack(lanInterface, lanCIDR, wanInterface, assetsDir string) Stack {
 			SocksPort:        20173,
 			WatchdogInterval: "10s",
 		},
+		DNS: DefaultClientDNS(),
 		Dashboard: Dashboard{
 			CollectorInterval: "3s",
 		},
@@ -149,6 +240,7 @@ func LoadStack() (Stack, error) {
 	if err := readJSON(paths.StackConfig, &cfg); err != nil {
 		return cfg, err
 	}
+	cfg = NormalizeStack(cfg)
 	if err := cfg.Validate(); err != nil {
 		return Stack{}, err
 	}
@@ -156,7 +248,7 @@ func LoadStack() (Stack, error) {
 }
 
 func SaveStack(cfg Stack) error {
-	return saveStackFile(paths.StackConfig, cfg)
+	return saveStackFile(paths.StackConfig, NormalizeStack(cfg))
 }
 
 func SaveRouting(cfg Routing) error {
@@ -164,6 +256,7 @@ func SaveRouting(cfg Routing) error {
 }
 
 func saveStackFile(path string, cfg Stack) error {
+	cfg = NormalizeStack(cfg)
 	if err := cfg.Validate(); err != nil {
 		return err
 	}
@@ -219,6 +312,7 @@ func LoadFiles(stackPath, routingPath string) (Stack, Routing, error) {
 	if err := readJSON(routingPath, &routing); err != nil {
 		return stack, routing, err
 	}
+	stack = NormalizeStack(stack)
 	if err := stack.Validate(); err != nil {
 		return stack, routing, err
 	}
@@ -259,6 +353,42 @@ func (s Stack) Validate() error {
 	}
 	if err := validatePort("backend.socksPort", s.Backend.SocksPort); err != nil {
 		return err
+	}
+	if err := validatePort("dns.listenPort", s.DNS.ListenPort); err != nil {
+		return err
+	}
+	for _, p := range []int{53, 20175, s.Front.SocksPort, s.Front.TProxyPort, s.Front.PolicyPort, s.Backend.SocksPort} {
+		if s.DNS.ListenPort == p || s.DNS.XrayPort == p {
+			return fmt.Errorf("DNS listener conflicts with existing port %d", p)
+		}
+	}
+	if len(s.DNS.Resolvers) > 8 {
+		return errors.New("dns.resolvers must contain at most 8 resolvers")
+	}
+	if err := validatePort("dns.xrayPort", s.DNS.XrayPort); err != nil {
+		return err
+	}
+	if s.DNS.ListenPort == s.DNS.XrayPort || s.DNS.XrayPort == s.Front.PolicyPort || s.DNS.XrayPort == s.Backend.SocksPort {
+		return errors.New("dns.xrayPort must not conflict with Guardian listener ports")
+	}
+	switch s.DNS.Mode {
+	case DNSModeSystem, DNSModeCustom, DNSModeXray:
+	default:
+		return fmt.Errorf("invalid dns.mode %q", s.DNS.Mode)
+	}
+	if s.DNS.Mode == DNSModeCustom && len(s.DNS.Resolvers) == 0 {
+		return errors.New("dns.resolvers must not be empty in custom mode")
+	}
+	seenResolvers := make(map[string]struct{}, len(s.DNS.Resolvers))
+	for _, resolver := range s.DNS.Resolvers {
+		endpoint, err := DNSResolverEndpoint(resolver)
+		if err != nil {
+			return err
+		}
+		if _, exists := seenResolvers[endpoint]; exists {
+			return fmt.Errorf("duplicate DNS resolver %q", resolver)
+		}
+		seenResolvers[endpoint] = struct{}{}
 	}
 	if s.Front.RouteTable <= 0 {
 		return errors.New("front.routeTable must be positive")

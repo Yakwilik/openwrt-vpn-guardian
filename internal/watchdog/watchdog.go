@@ -288,6 +288,9 @@ func saveState(s State) {
 }
 
 func candidateKey(c Candidate) string {
+	if c.Key != "" {
+		return c.Key
+	}
 	return fmt.Sprintf("%d:%d", c.SubscriptionID, c.TouchID)
 }
 
@@ -468,33 +471,8 @@ func apiCall(method, path string, payload any, timeout time.Duration) (map[strin
 	return v2rayautil.CallAPI("vpn-guardian-watchdog", method, path, payload, timeout)
 }
 func setCandidate(c Candidate) error {
-	body := map[string]any{
-		"outbound": "proxy",
-		"touches": []any{map[string]any{
-			"_type":    "subscriptionServer",
-			"id":       c.TouchID,
-			"sub":      c.Sub,
-			"outbound": "proxy",
-		}},
-	}
-	if _, err := apiCall(http.MethodPut, "outboundConnections", body, 10*time.Second); err != nil {
-		return err
-	}
-	deadline := time.Now().Add(8 * time.Second)
-	for time.Now().Before(deadline) {
-		if listenerReady() {
-			db, err := openDB()
-			if err == nil {
-				id, sub, ok := current(db)
-				db.Close()
-				if ok && id == c.TouchID && sub == c.Sub {
-					return nil
-				}
-			}
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
-	return fmt.Errorf("v2rayA did not settle on %s id=%d sub=%d", c.Name, c.TouchID, c.Sub)
+	_, err := v2rayautil.SelectCandidate(context.Background(), c)
+	return err
 }
 
 func listenerReady() bool {
@@ -779,33 +757,15 @@ func run(logHealthy bool) error {
 	saveState(s)
 	logLine("health failed (%d/2): %s", s.Failures, healthSummary(h))
 
+	// Confirm failure on the next daemon iteration, without monopolizing the
+	// control lock during an eight-second sleep and an unbounded candidate scan.
 	if s.Failures < 2 && activeKnown {
-		time.Sleep(8 * time.Second)
-		h = healthForActiveCandidate(activeKnown, healthNow)
-		s.LastHealth = h
-		if h.Healthy {
-			if err := syncPolicyRuntime(ctrl, true); err != nil {
-				return err
-			}
-			s.Failures = 0
-			s.LastHealthy = time.Now().Unix()
-			s.LastError = ""
-			if activeKnown {
-				markCandidateSuccess(&s, active, h)
-			}
-			saveState(s)
-			logLine("recovered on confirmation: %s", healthSummary(h))
-			return nil
-		}
-		s.Failures = 2
-		if activeKnown {
-			markCandidateFailure(&s, active)
-			s.LastFailedNode = active.Name
-			st := s.Nodes[candidateKey(active)]
-			logLine("active node cooldown until %d after %d consecutive failures: %s", st.CooldownUntil, st.ConsecutiveFailures, active.Name)
-		}
+		return nil
+	}
+	if activeKnown {
+		markCandidateFailure(&s, active)
+		s.LastFailedNode = active.Name
 		saveState(s)
-		logLine("health confirmation failed (2/2): %s", healthSummary(h))
 	}
 
 	if ctrl.Mode == "pinned" {
@@ -858,12 +818,15 @@ func run(logHealthy bool) error {
 		return true
 	}
 
-	for _, r := range ready {
+	for i, r := range ready {
+		if i >= 1 {
+			break
+		}
 		if try(r, false) {
 			return nil
 		}
 	}
-	if len(cooling) > 0 {
+	if len(ready) == 0 && len(cooling) > 0 {
 		if try(cooling[0], true) {
 			return nil
 		}

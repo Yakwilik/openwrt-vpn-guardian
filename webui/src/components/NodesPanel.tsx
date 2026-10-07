@@ -9,6 +9,7 @@ interface NodesPanelProps {
   latency: Record<string, string>;
   busy?: string;
   onLatency: () => void;
+  onReselect: () => void;
   onSwitch: (node: NodeInfo) => void;
   onPin: (node: NodeInfo) => void;
 }
@@ -18,6 +19,7 @@ export function NodesPanel({
   latency,
   busy,
   onLatency,
+  onReselect,
   onSwitch,
   onPin,
 }: NodesPanelProps) {
@@ -64,7 +66,10 @@ export function NodesPanel({
           <p>Доступные кандидаты после фильтрации transport allowlist.</p>
         </div>
         <div className="heading-actions">
-          <span className="panel-counter">{filtered.length}/{nodes.length}</span>
+          <button type="button" className="button button-primary" disabled={!canManage || Boolean(busy)} onClick={onReselect}>
+ {busy === "reselect" ? "Подбираю другую…" : "Подобрать другую"}
+ </button>
+ <span className="panel-counter">{filtered.length}/{nodes.length}</span>
           <button className="button button-ghost" disabled={!canManage || Boolean(busy)} onClick={onLatency}>
             {busy === "latency" ? "Проверяю…" : "Latency"}
           </button>

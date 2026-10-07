@@ -102,6 +102,9 @@ func (e *routerSetup) LoadDraft(ctx context.Context) (setup.Draft, error) {
 	if stackPresent != routingPresent {
 		return setup.Draft{}, errors.New("only one configuration manifest exists; restore the missing stack.json or routing.json before initialization")
 	}
+	if stackPresent {
+		s = config.NormalizeStack(s)
+	}
 	selection := s.Selection
 	if selection.Validate() != nil {
 		selection = config.Selection{AllowedTransports: config.SupportedTransports()}

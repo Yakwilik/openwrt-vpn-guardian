@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/Yakwilik/openwrt-vpn-guardian/internal/config"
+	"github.com/Yakwilik/openwrt-vpn-guardian/internal/dnsproxy"
 	"github.com/Yakwilik/openwrt-vpn-guardian/internal/lockfile"
 	"github.com/Yakwilik/openwrt-vpn-guardian/internal/paths"
 	"github.com/Yakwilik/openwrt-vpn-guardian/internal/policy"
@@ -38,12 +39,12 @@ type Stack = config.Stack
 type Routing = config.Routing
 
 type Status struct {
-	ManifestVersion                             int    `json:"manifestVersion"`
-	Mode                                        string `json:"mode"`
-	Runtime                                     string `json:"runtime"`
-	Front, Policy, Backend, Watchdog, Collector bool
-	NFT, PolicyRule, RouteTable, NoLANBlackhole bool
-	Backups                                     int `json:"backups"`
+	ManifestVersion                                  int    `json:"manifestVersion"`
+	Mode                                             string `json:"mode"`
+	Runtime                                          string `json:"runtime"`
+	Front, Policy, Backend, DNS, Watchdog, Collector bool
+	NFT, PolicyRule, RouteTable, NoLANBlackhole      bool
+	Backups                                          int `json:"backups"`
 }
 
 const usageText = "vpn-guardian stack {bootstrap [--non-interactive] [--dry-run]|init [--non-interactive] [--dry-run]|status|validate|apply|backup|restore <archive>|selftest|cleanup}"
@@ -408,6 +409,7 @@ func generate(dir string, s Stack, r Routing) error {
 		data any
 	}{
 		{filepath.Base(paths.FrontConfig), front},
+		{filepath.Base(paths.DNSXrayConfig), makeDNSXray(s)},
 		{filepath.Base(paths.PolicyFailOpen), makePolicy(s, "failopen")},
 		{filepath.Base(paths.PolicyVPNOnly), makePolicy(s, "killswitch")},
 		{filepath.Base(paths.PolicyBlocked), makePolicy(s, "killswitch-blocked")},
@@ -430,6 +432,8 @@ func generate(dir string, s Stack, r Routing) error {
 		{"vpn-front.init", makeXrayInit("vpn-front", paths.FrontConfig, s.AssetsDir, 98, 10)},
 		{"vpn-policy.init", makeXrayInit("vpn-policy", paths.PolicyConfig, s.AssetsDir, 97, 11)},
 		{"vpn-front-routing.init", makeRoutingInit(s)},
+		{"vpn-guardian-dns.init", makeDNSInit(s)},
+		{"vpn-dns-xray.init", makeXrayInit("vpn-dns-xray", paths.DNSXrayConfig, s.AssetsDir, 97, 8)},
 		{"vpn-backend-watchdog.init", makeWatchdogInit(s)},
 		{"vpn-dashboard-collector.init", makeCollectorInit(s)},
 	}
@@ -508,6 +512,24 @@ func policyRoute(tag string) map[string]any {
 	return map[string]any{"domainStrategy": "AsIs", "rules": []any{map[string]any{"type": "field", "inboundTag": []string{"policy-socks"}, "outboundTag": tag}}}
 }
 
+// This core is DNS-only. Application direct/fail-open outbounds must never
+// inherit its VPN-bound resolver, or direct traffic acquires a VPN dependency.
+func makeDNSXray(s Stack) map[string]any {
+	return map[string]any{
+		"log":      map[string]any{"loglevel": "warning"},
+		"dns":      map[string]any{"servers": config.XrayDNSServers(), "queryStrategy": "UseIP", "tag": "dns-query"},
+		"inbounds": []any{map[string]any{"tag": "dns-in", "listen": "127.0.0.1", "port": s.DNS.XrayPort, "protocol": "dokodemo-door", "settings": map[string]any{"address": "1.1.1.1", "port": 53, "network": "tcp,udp"}}},
+		"outbounds": []any{
+			map[string]any{"tag": "vpn-backend", "protocol": "socks", "settings": map[string]any{"servers": []any{map[string]any{"address": "127.0.0.1", "port": s.Backend.SocksPort}}}},
+			map[string]any{"tag": "dns-out", "protocol": "dns", "settings": map[string]any{"nonIPQuery": "drop"}},
+		},
+		"routing": map[string]any{"domainStrategy": "AsIs", "rules": []any{
+			map[string]any{"type": "field", "inboundTag": []string{"dns-in"}, "outboundTag": "dns-out"},
+			map[string]any{"type": "field", "inboundTag": []string{"dns-query"}, "outboundTag": "vpn-backend"},
+		}},
+	}
+}
+
 func makeNFT(s Stack) string {
 	var b strings.Builder
 	b.WriteString("add table inet vpn_front\ndelete table inet vpn_front\ntable inet vpn_front {\n  set bypass4 {\n    type ipv4_addr\n    flags interval\n    elements = { ")
@@ -517,7 +539,20 @@ func makeNFT(s Stack) string {
 		}
 		b.WriteString(x)
 	}
-	b.WriteString(" }\n  }\n  chain prerouting {\n")
+	b.WriteString(" }\n  }\n")
+	// All LAN DNS is captured before TPROXY so local names and the selected
+	// external DNS policy are enforced consistently. Router-originated DNS is
+	// not in this hook and remains available for VPN bootstrap.
+	b.WriteString("  chain dns_redirect {\n    type nat hook prerouting priority -170; policy accept;\n")
+	fmt.Fprintf(&b, "    iifname %q ip saddr %s udp dport 53 redirect to :%d\n", s.LANInterface, s.LANCIDR, s.DNS.ListenPort)
+	fmt.Fprintf(&b, "    iifname %q ip saddr %s tcp dport 53 redirect to :%d\n", s.LANInterface, s.LANCIDR, s.DNS.ListenPort)
+	fmt.Fprintf(&b, "    iifname %q meta nfproto ipv6 udp dport 53 redirect to :%d\n", s.LANInterface, s.DNS.ListenPort)
+	fmt.Fprintf(&b, "    iifname %q meta nfproto ipv6 tcp dport 53 redirect to :%d\n", s.LANInterface, s.DNS.ListenPort)
+	b.WriteString("  }\n  chain dns_input {\n    type filter hook input priority filter - 10; policy accept;\n")
+	fmt.Fprintf(&b, "    iifname %q ip saddr %s udp dport %d accept\n", s.LANInterface, s.LANCIDR, s.DNS.ListenPort)
+	fmt.Fprintf(&b, "    iifname %q ip saddr %s tcp dport %d accept\n", s.LANInterface, s.LANCIDR, s.DNS.ListenPort)
+	b.WriteString("  }\n")
+	b.WriteString("  chain prerouting {\n")
 	b.WriteString("    type filter hook prerouting priority mangle - 10; policy accept;\n")
 	fmt.Fprintf(&b, "    iifname %q ip saddr %s ct status dnat return\n", s.LANInterface, s.LANCIDR)
 	fmt.Fprintf(&b, "    iifname %q ip saddr %s ip daddr @bypass4 return\n", s.LANInterface, s.LANCIDR)
@@ -558,6 +593,28 @@ func makeRoutingInit(s Stack) string {
 		"  nft delete table inet vpn_front 2>/dev/null || true",
 		fmt.Sprintf("  while ip rule del priority 5 fwmark 0x%x/0x%x table %d 2>/dev/null; do :; done", s.Front.Mark, s.Front.Mark, s.Front.RouteTable),
 		fmt.Sprintf("  ip route flush table %d 2>/dev/null || true", s.Front.RouteTable),
+		"}",
+		"",
+	}
+	return strings.Join(lines, "\n")
+}
+
+func makeDNSInit(s Stack) string {
+	lines := []string{
+		"#!/bin/sh /etc/rc.common",
+		"USE_PROCD=1",
+		"START=98",
+		"STOP=9",
+		"PROG=/usr/bin/vpn-guardian",
+		"",
+		"start_service() {",
+		"  procd_open_instance vpn-guardian-dns",
+		"  procd_set_param command \"$PROG\" dns-proxy",
+		"  procd_set_param stdout 1",
+		"  procd_set_param stderr 1",
+		"  procd_set_param respawn 5 5 0",
+		"  procd_set_param limits nofile=\"4096 4096\"",
+		"  procd_close_instance",
 		"}",
 		"",
 	}
@@ -606,6 +663,7 @@ func makeCollectorInit(s Stack) string {
 }
 func validateGenerated(ctx context.Context, dir, assetsDir string) error {
 	xrayConfigs := []string{
+		filepath.Base(paths.DNSXrayConfig),
 		filepath.Base(paths.FrontConfig),
 		filepath.Base(paths.PolicyFailOpen),
 		filepath.Base(paths.PolicyVPNOnly),
@@ -681,6 +739,8 @@ func applyCmd() error {
 	frontWasEnabled := markerErr == nil
 
 	files := map[string]string{
+		filepath.Base(paths.DNSXrayConfig):  paths.DNSXrayConfig,
+		"vpn-dns-xray.init":                 paths.DNSXrayServiceInit,
 		filepath.Base(paths.FrontConfig):    paths.FrontConfig,
 		filepath.Base(paths.PolicyFailOpen): paths.PolicyFailOpen,
 		filepath.Base(paths.PolicyVPNOnly):  paths.PolicyVPNOnly,
@@ -690,6 +750,7 @@ func applyCmd() error {
 		"vpn-front.init":                    paths.FrontServiceInit,
 		"vpn-policy.init":                   paths.PolicyServiceInit,
 		"vpn-front-routing.init":            paths.FrontRoutingInit,
+		"vpn-guardian-dns.init":             paths.DNSServiceInit,
 		"vpn-backend-watchdog.init":         paths.WatchdogServiceInit,
 		"vpn-dashboard-collector.init":      paths.CollectorServiceInit,
 	}
@@ -730,70 +791,158 @@ func ApplyRouting(r config.Routing) error {
 	if err := r.Validate(); err != nil {
 		return err
 	}
-
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	lock, err := lockfile.Acquire(ctx, paths.ControlLock)
+	if err != nil {
+		return err
+	}
+	defer lockfile.Release(lock)
 	s, err := config.LoadStack()
 	if err != nil {
 		return err
 	}
-	dir, err := os.MkdirTemp("/tmp", "vpn-guardian-routing-")
+	if _, err := dnsproxy.LoadDomainMatcher(r.ProxyDomains, s.AssetsDir); err != nil {
+		return err
+	}
+	oldRouting, err := os.ReadFile(paths.RoutingConfig)
+	if err != nil {
+		return err
+	}
+	oldFront, err := os.ReadFile(paths.FrontConfig)
+	if err != nil {
+		return err
+	}
+	dir, err := os.MkdirTemp("", "guardian-routing-")
 	if err != nil {
 		return err
 	}
 	defer os.RemoveAll(dir)
-
 	if err := generate(dir, s, r); err != nil {
 		return err
 	}
 	if err := validateGenerated(context.Background(), dir, s.AssetsDir); err != nil {
 		return err
 	}
+	active := false
+	if _, err := os.Stat(paths.FrontEnabled); err == nil {
+		active = true
+	}
+	rollback := func(cause error) error {
+		cause = errors.Join(cause, writePrivateAtomic(paths.RoutingConfig, oldRouting), writePrivateAtomic(paths.FrontConfig, oldFront))
+		if active {
+			_, e := run(paths.FrontServiceInit, "restart")
+			cause = errors.Join(cause, e, dnsproxy.Reload(context.Background()))
+		}
+		return cause
+	}
+	if err := config.SaveRouting(r); err != nil {
+		return err
+	}
+	if err := copyAtomic(filepath.Join(dir, filepath.Base(paths.FrontConfig)), paths.FrontConfig, 0600); err != nil {
+		return rollback(err)
+	}
+	if !active {
+		return nil
+	}
+	if out, err := run(paths.FrontServiceInit, "restart"); err != nil {
+		return rollback(fmt.Errorf("restart front: %w: %s", err, out))
+	}
+	if err := dnsproxy.Reload(context.Background()); err != nil {
+		return rollback(err)
+	}
+	return nil
+}
 
+// ApplyDNS updates only LAN client DNS policy. Router-originated DNS remains
+// untouched, so VPN backend bootstrap never depends on the VPN DNS path.
+func ApplyDNS(mode string, resolvers []string, onlyProxy *bool) error {
 	lockCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	lock, err := lockfile.Acquire(lockCtx, paths.ControlLock)
 	if err != nil {
-		return fmt.Errorf("acquire control lock for routing update: %w", err)
+		return err
 	}
 	defer lockfile.Release(lock)
 
-	snapshot, err := backup("pre-routing")
+	s, r, err := config.Load()
 	if err != nil {
-		return fmt.Errorf("backup before routing update: %w", err)
+		return err
 	}
-	_, markerErr := os.Stat(paths.FrontEnabled)
-	frontWasEnabled := markerErr == nil
+	oldStack := s
+	oldBytes, err := os.ReadFile(paths.StackConfig)
+	if err != nil {
+		return err
+	}
+
+	s.DNS.Mode = strings.TrimSpace(mode)
+	s.DNS.Resolvers = append([]string(nil), resolvers...)
+	if onlyProxy != nil {
+		s.DNS.OnlyProxyDomains = onlyProxy
+	}
+	s = config.NormalizeStack(s)
+	if err := s.Validate(); err != nil {
+		return err
+	}
+	if _, err := dnsproxy.BuildRuntime(s, r, "/"); err != nil {
+		return err
+	}
 
 	rollback := func(cause error) error {
-		restoreErr := restoreSnapshotSparse(snapshot)
-		if frontWasEnabled {
-			if out, restartErr := run(paths.FrontServiceInit, "restart"); restartErr != nil {
-				restoreErr = errors.Join(restoreErr, fmt.Errorf("restart restored vpn-front: %w: %s", restartErr, out))
-			}
+		restoreErr := writePrivateAtomic(paths.StackConfig, oldBytes)
+		reloadCtx, reloadCancel := context.WithTimeout(context.Background(), 6*time.Second)
+		defer reloadCancel()
+		reloadErr := dnsproxy.Reload(reloadCtx)
+		lifecycleErr := syncDNSXrayService(oldStack)
+		return errors.Join(cause, restoreErr, reloadErr, lifecycleErr)
+	}
+
+	if err := config.SaveStack(s); err != nil {
+		return err
+	}
+	if s.DNS.Mode == config.DNSModeXray {
+		if err := syncDNSXrayService(s); err != nil {
+			return rollback(fmt.Errorf("prepare Xray DNS: %w", err))
 		}
-		return errors.Join(cause, restoreErr)
 	}
 
-	if err := config.SaveRouting(r); err != nil {
-		return rollback(err)
+	reloadCtx, reloadCancel := context.WithTimeout(context.Background(), 6*time.Second)
+	defer reloadCancel()
+	if err := dnsproxy.Reload(reloadCtx); err != nil {
+		return rollback(fmt.Errorf("apply DNS: %w", err))
 	}
-	if err := copyAtomic(
-		filepath.Join(dir, filepath.Base(paths.FrontConfig)),
-		paths.FrontConfig,
-		0644,
-	); err != nil {
-		return rollback(err)
-	}
-
-	if !frontWasEnabled {
-		return nil
-	}
-	if out, err := run(paths.FrontServiceInit, "restart"); err != nil {
-		return rollback(fmt.Errorf("restart vpn-front: %w: %s", err, out))
-	}
-	if !serviceRunning("vpn-front") {
-		return rollback(errors.New("vpn-front is not running after routing update"))
+	if s.DNS.Mode != config.DNSModeXray {
+		if err := syncDNSXrayService(s); err != nil {
+			return rollback(fmt.Errorf("apply DNS Xray lifecycle: %w", err))
+		}
 	}
 	return nil
+}
+
+func ensureXrayDNS(s Stack) error {
+	if tcpReady(fmt.Sprintf("127.0.0.1:%d", s.DNS.XrayPort), 250*time.Millisecond) && serviceRunning("vpn-dns-xray") {
+		return nil
+	}
+	if out, err := run(paths.DNSXrayServiceInit, "start"); err != nil {
+		return fmt.Errorf("start DNS Xray: %w: %s", err, out)
+	}
+	until := time.Now().Add(5 * time.Second)
+	for time.Now().Before(until) {
+		if tcpReady(fmt.Sprintf("127.0.0.1:%d", s.DNS.XrayPort), 250*time.Millisecond) {
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return errors.New("DNS-only Xray listener did not become ready")
+}
+
+func tcpReady(addr string, timeout time.Duration) bool {
+	conn, err := net.DialTimeout("tcp", addr, timeout)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
 }
 
 func rollbackApply(snapshot string, frontWasEnabled bool) {
@@ -819,12 +968,13 @@ func cleanupCmd() error {
 }
 
 func cleanupGeneratedRuntime() {
-	for _, svc := range []string{"vpn-dashboard-collector", "vpn-backend-watchdog", "vpn-front-routing", "vpn-front", "vpn-policy"} {
+	for _, svc := range []string{"vpn-dashboard-collector", "vpn-backend-watchdog", "vpn-guardian-dns", "vpn-dns-xray", "vpn-front-routing", "vpn-front", "vpn-policy"} {
 		initPath := "/etc/init.d/" + svc
 		if _, err := os.Stat(initPath); err == nil {
 			_, _ = run(initPath, "stop")
 		}
 	}
+	_ = dnsproxy.RemoveLocalGuards()
 
 	_ = exec.Command("nft", "delete", "table", "inet", "vpn_front").Run()
 	for i := 0; i < 4; i++ {
@@ -842,6 +992,8 @@ func cleanupGeneratedRuntime() {
 		paths.FrontServiceInit,
 		paths.PolicyServiceInit,
 		paths.FrontRoutingInit,
+		paths.DNSServiceInit,
+		paths.DNSXrayServiceInit,
 		paths.WatchdogServiceInit,
 		paths.CollectorServiceInit,
 	} {
@@ -867,6 +1019,7 @@ func enableStackServices() error {
 		"vpn-policy",
 		"vpn-front",
 		"vpn-front-routing",
+		"vpn-guardian-dns",
 		"vpn-backend-watchdog",
 		"vpn-dashboard-collector",
 	} {
@@ -874,26 +1027,102 @@ func enableStackServices() error {
 			return fmt.Errorf("enable %s: %v: %s", svc, err, out)
 		}
 	}
+	s, _, err := loadConfig()
+	if err != nil {
+		return err
+	}
+	return syncDNSXrayService(s)
+}
+
+func syncDNSXrayService(s Stack) error {
+	if _, err := os.Stat(paths.DNSXrayServiceInit); err != nil {
+		if errors.Is(err, os.ErrNotExist) && s.DNS.Mode != config.DNSModeXray {
+			return nil
+		}
+		return err
+	}
+	if s.DNS.Mode == config.DNSModeXray {
+		if out, err := run(paths.DNSXrayServiceInit, "enable"); err != nil {
+			return fmt.Errorf("enable DNS Xray: %w: %s", err, out)
+		}
+		return ensureXrayDNS(s)
+	}
+	// Keep the optional DNS-only Xray completely out of system/custom modes.
+	// The init script is generated and retained so a later hot switch to xray
+	// needs no full stack apply.
+	if out, err := run(paths.DNSXrayServiceInit, "stop"); err != nil {
+		return fmt.Errorf("stop DNS Xray: %w: %s", err, out)
+	}
+	if out, err := run(paths.DNSXrayServiceInit, "disable"); err != nil {
+		return fmt.Errorf("disable DNS Xray: %w: %s", err, out)
+	}
 	return nil
 }
 
 func restartStack() error {
+	s, _, err := loadConfig()
+	if err != nil {
+		return err
+	}
 	mode := strings.TrimSpace(readFile(paths.PolicyMode))
 	if mode != "killswitch" && mode != "failopen" && mode != "direct" {
-		s, _, err := loadConfig()
-		if err != nil {
-			return err
-		}
 		mode = s.Policy.Default
 	}
 	if err := policy.Apply(mode); err != nil {
 		return fmt.Errorf("apply policy mode %s: %w", mode, err)
 	}
 
-	for _, svc := range []string{"vpn-front", "vpn-front-routing", "vpn-backend-watchdog", "vpn-dashboard-collector"} {
+	if out, err := run(paths.FrontServiceInit, "restart"); err != nil {
+		return fmt.Errorf("restart vpn-front: %v: %s", err, out)
+	}
+	// Start DNS before installing client interception. This applies to all
+	// external modes because local OpenWrt/DHCP names are always dispatched by
+	// the DNS proxy to dnsmasq.
+	if s.DNS.Mode == config.DNSModeXray {
+		if err := ensureXrayDNS(s); err != nil {
+			return err
+		}
+	}
+	if err := startDNSProxy(s); err != nil {
+		return err
+	}
+	if out, err := run(paths.FrontRoutingInit, "restart"); err != nil {
+		return fmt.Errorf("restart vpn-front-routing: %v: %s", err, out)
+	}
+
+	for _, svc := range []string{"vpn-backend-watchdog", "vpn-dashboard-collector"} {
 		if out, err := run("/etc/init.d/"+svc, "restart"); err != nil {
 			return fmt.Errorf("restart %s: %v: %s", svc, err, out)
 		}
+	}
+	return nil
+}
+
+func startDNSProxy(s Stack) error {
+	out, err := run(paths.DNSServiceInit, "restart")
+	if err != nil {
+		return fmt.Errorf("restart vpn-guardian-dns: %v: %s", err, out)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	addr := fmt.Sprintf("127.0.0.1:%d", s.DNS.ListenPort)
+	for time.Now().Before(deadline) {
+		conn, dialErr := net.DialTimeout("tcp", addr, 300*time.Millisecond)
+		if dialErr == nil {
+			_ = conn.Close()
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return fmt.Errorf("vpn-guardian-dns did not listen on %s", addr)
+}
+
+func stopDNSProxy() error {
+	if _, err := os.Stat(paths.DNSServiceInit); errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	out, err := run(paths.DNSServiceInit, "stop")
+	if err != nil {
+		return fmt.Errorf("stop vpn-guardian-dns: %v: %s", err, out)
 	}
 	return nil
 }
@@ -922,6 +1151,7 @@ func readFile(path string) string {
 }
 
 var backupFiles = []string{
+	paths.DNSXrayConfig, paths.DNSXrayServiceInit,
 	paths.StackConfig,
 	paths.RoutingConfig,
 	paths.ControlConfig,
@@ -940,6 +1170,7 @@ var backupFiles = []string{
 	paths.FrontServiceInit,
 	paths.PolicyServiceInit,
 	paths.FrontRoutingInit,
+	paths.DNSServiceInit,
 	paths.WatchdogServiceInit,
 	paths.CollectorServiceInit,
 }
@@ -1221,6 +1452,7 @@ func statusCmd() error {
 		Front:           serviceRunning("vpn-front"),
 		Policy:          serviceRunning("vpn-policy"),
 		Backend:         serviceRunning("v2raya"),
+		DNS:             serviceRunning("vpn-guardian-dns"),
 		Watchdog:        serviceRunning("vpn-backend-watchdog"),
 		Collector:       serviceRunning("vpn-dashboard-collector"),
 		NFT:             exec.Command("nft", "list", "table", "inet", "vpn_front").Run() == nil,

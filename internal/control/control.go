@@ -23,6 +23,7 @@ import (
 	"github.com/Yakwilik/openwrt-vpn-guardian/internal/paths"
 	"github.com/Yakwilik/openwrt-vpn-guardian/internal/policy"
 	v2rayautil "github.com/Yakwilik/openwrt-vpn-guardian/internal/v2raya"
+	"github.com/Yakwilik/openwrt-vpn-guardian/internal/watchdog"
 )
 
 const dbPath = "/etc/v2raya/v2raya.db"
@@ -43,6 +44,7 @@ type State struct {
 }
 
 type Control struct {
+	PinKey            string `json:"pinKey,omitempty"`
 	Mode              string `json:"mode"`
 	PinName           string `json:"pinName,omitempty"`
 	PinProtocol       string `json:"pinProtocol,omitempty"`
@@ -332,6 +334,12 @@ func candidateForControl(ctrl Control) (Candidate, error) {
 		return Candidate{}, err
 	}
 	for _, c := range cs {
+		if ctrl.PinKey != "" {
+			if c.Key == ctrl.PinKey {
+				return c, nil
+			}
+			continue
+		}
 		if (ctrl.PinSubscriptionID == 0 || c.SubscriptionID == ctrl.PinSubscriptionID) && c.Name == ctrl.PinName && c.Protocol == ctrl.PinProtocol && c.Network == ctrl.PinNetwork && c.Security == ctrl.PinSecurity {
 			return c, nil
 		}
@@ -339,23 +347,12 @@ func candidateForControl(ctrl Control) (Candidate, error) {
 	return Candidate{}, fmt.Errorf("pinned node no longer exists: %s", ctrl.PinName)
 }
 func setTouchRaw(id, sub int) error {
-	body := map[string]any{"outbound": "proxy", "touches": []any{map[string]any{"_type": "subscriptionServer", "id": id, "sub": sub, "outbound": "proxy"}}}
-	if _, err := apiCall(http.MethodPut, "outboundConnections", body, 10*time.Second); err != nil {
-		return err
-	}
-	if err := waitReady(8 * time.Second); err != nil {
-		return err
-	}
-	db, err := openDB()
+	c, err := candidateByTouch(id, sub)
 	if err != nil {
 		return err
 	}
-	defer db.Close()
-	aid, asub, ok := current(db)
-	if !ok || aid != id || asub != sub {
-		return fmt.Errorf("v2rayA selected id=%d sub=%d, expected id=%d sub=%d", aid, asub, id, sub)
-	}
-	return nil
+	_, err = v2rayautil.SelectCandidate(context.Background(), c)
+	return err
 }
 
 func setByTouch(id, sub int) error {
@@ -646,52 +643,8 @@ func currentCandidate(db *sql.DB) (Candidate, bool, error) {
 }
 
 func apiSetOne(want Candidate) error {
-	db, err := openDB()
-	if err != nil {
-		return err
-	}
-	fresh, err := resolveCandidateFresh(db, want)
-	if err != nil {
-		db.Close()
-		return err
-	}
-	db.Close()
-
-	body := map[string]any{
-		"outbound": "proxy",
-		"touches": []any{
-			map[string]any{
-				"_type":    "subscriptionServer",
-				"id":       fresh.TouchID,
-				"sub":      fresh.Sub,
-				"outbound": "proxy",
-			},
-		},
-	}
-	if _, err := v2rayautil.CallAPI("vpn-guardian-control", http.MethodPut, "outboundConnections", body, 8*time.Second); err != nil {
-		return fmt.Errorf("switch v2rayA node: %w", err)
-	}
-	if err := waitReady(6 * time.Second); err != nil {
-		return err
-	}
-
-	db, err = openDB()
-	if err != nil {
-		return err
-	}
-	actual, ok, checkErr := currentCandidate(db)
-	db.Close()
-	if checkErr != nil {
-		return checkErr
-	}
-	if !ok {
-		return fmt.Errorf("v2rayA API switch completed but no active proxy node is recorded")
-	}
-	if actual.Name != fresh.Name || actual.Protocol != fresh.Protocol {
-		return fmt.Errorf("v2rayA selected %s (%s), expected %s (%s)",
-			actual.Name, actual.Protocol, fresh.Name, fresh.Protocol)
-	}
-	return nil
+	_, err := v2rayautil.SelectCandidate(context.Background(), want)
+	return err
 }
 
 func transparent(db *sql.DB) (string, error) {
@@ -1388,6 +1341,7 @@ func Run(args []string) {
 
 // NodeInfo is the dashboard-safe representation of a v2rayA node.
 type NodeInfo struct {
+	Key            string `json:"key"`
 	ID             int    `json:"id"`
 	Sub            int    `json:"sub"`
 	SubscriptionID int    `json:"subscriptionId"`
@@ -1467,6 +1421,7 @@ func Snapshot(includeSecrets bool) (FrontSnapshot, error) {
 			netLabel = fmt.Sprintf("%s(%s+%s)", c.Protocol, c.Network, c.Security)
 		}
 		out.Nodes = append(out.Nodes, NodeInfo{
+			Key:            c.Key,
 			ID:             c.TouchID,
 			Sub:            c.Sub,
 			SubscriptionID: c.SubscriptionID,
@@ -1484,7 +1439,7 @@ func Snapshot(includeSecrets bool) (FrontSnapshot, error) {
 const frontControlLockPath = paths.ControlLock
 
 func withFrontControlLock(fn func() error) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	f, err := lockfile.Acquire(ctx, frontControlLockPath)
 	if err != nil {
@@ -1495,6 +1450,7 @@ func withFrontControlLock(fn func() error) error {
 }
 
 func clearPin(c *Control) {
+	c.PinKey = ""
 	c.PinName = ""
 	c.PinProtocol = ""
 	c.PinNetwork = ""
@@ -1509,6 +1465,9 @@ func applyFrontPolicy(c Control) error {
 	}
 	if mode != "killswitch" && mode != "failopen" && mode != "direct" {
 		return fmt.Errorf("invalid front policy %q", mode)
+	}
+	if policy.Runtime() == mode {
+		return nil
 	}
 	return policy.Apply(mode)
 }
@@ -1537,45 +1496,80 @@ func SetDirectFront() error {
 	})
 }
 
-func PinFront(id, sub int) error {
+func candidateByReference(id, sub int, keys []string) (Candidate, error) {
+	if len(keys) == 0 || keys[0] == "" {
+		return candidateByTouch(id, sub)
+	}
+	db, err := openDB()
+	if err != nil {
+		return Candidate{}, err
+	}
+	defer db.Close()
+	cs, err := candidates(db)
+	if err != nil {
+		return Candidate{}, err
+	}
+	for _, c := range cs {
+		if c.Key == keys[0] {
+			return c, nil
+		}
+	}
+	return Candidate{}, errors.New("выбранная нода больше не существует; обновите список")
+}
+
+func PinFront(id, sub int, key ...string) error    { return switchFront(id, sub, true, key) }
+func SwitchFront(id, sub int, key ...string) error { return switchFront(id, sub, false, key) }
+func switchFront(id, sub int, pin bool, key []string) error {
 	return withFrontControlLock(func() error {
-		candidate, err := candidateByTouch(id, sub)
+		wanted, err := candidateByReference(id, sub, key)
 		if err != nil {
 			return err
 		}
-		if err := setTouchRaw(id, sub); err != nil {
-			return err
-		}
-		c := loadControl()
-		c.Mode = "pinned"
-		c.PinName = candidate.Name
-		c.PinProtocol = candidate.Protocol
-		c.PinNetwork = candidate.Network
-		c.PinSecurity = candidate.Security
-		c.PinSubscriptionID = candidate.SubscriptionID
-		if err := saveControl(c); err != nil {
-			return err
-		}
-		return applyFrontPolicy(c)
-	})
-}
-
-func SwitchFront(id, sub int) error {
-	return withFrontControlLock(func() error {
-		if _, err := candidateByTouch(id, sub); err != nil {
-			return err
-		}
-		if err := setTouchRaw(id, sub); err != nil {
+		actual, err := v2rayautil.SelectCandidate(context.Background(), wanted)
+		if err != nil {
 			return err
 		}
 		c := loadControl()
 		c.Mode = "auto"
 		clearPin(&c)
+		if pin {
+			c.Mode = "pinned"
+			c.PinKey = actual.Key
+			c.PinName = actual.Name
+			c.PinProtocol = actual.Protocol
+			c.PinNetwork = actual.Network
+			c.PinSecurity = actual.Security
+			c.PinSubscriptionID = actual.SubscriptionID
+		}
+		if err := applyFrontPolicy(c); err != nil {
+			return err
+		}
+		return saveControl(c)
+	})
+}
+
+func ReselectFront() (string, error) {
+	var name string
+	err := withFrontControlLock(func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), 75*time.Second)
+		defer cancel()
+		selected, err := watchdog.SelectAlternative(ctx)
+		if err != nil {
+			return err
+		}
+		c := loadControl()
+		c.Mode = "auto"
+		clearPin(&c)
+		if err := applyFrontPolicy(c); err != nil {
+			return err
+		}
 		if err := saveControl(c); err != nil {
 			return err
 		}
-		return applyFrontPolicy(c)
+		name = selected.Name
+		return nil
 	})
+	return name, err
 }
 
 func SetFailurePolicyFront(policy string) error {
@@ -1698,6 +1692,9 @@ func TestLatency() (any, error) {
 }
 
 func isPinned(c Control, node Candidate) bool {
+	if c.PinKey != "" {
+		return c.Mode == "pinned" && c.PinKey == node.Key
+	}
 	return c.Mode == "pinned" &&
 		(c.PinSubscriptionID == 0 || c.PinSubscriptionID == node.SubscriptionID) &&
 		c.PinName == node.Name &&

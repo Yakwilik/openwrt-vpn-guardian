@@ -2,6 +2,7 @@ package config
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -140,5 +141,85 @@ func TestSaveStackFileIsAtomicAndValidated(t *testing.T) {
 	if len(loaded.Selection.AllowedTransports) != 1 ||
 		loaded.Selection.AllowedTransports[0] != TransportVLESSXHTTPReality {
 		t.Fatalf("saved selection = %v", loaded.Selection.AllowedTransports)
+	}
+}
+
+func TestDNSDefaultsAndValidation(t *testing.T) {
+	cfg := DefaultStack("br-lan", "192.168.8.0/24", "eth1", "/usr/share/xray")
+	if cfg.DNS.Mode != DNSModeCustom || cfg.DNS.ListenPort != 20176 || cfg.DNS.XrayPort != 20178 {
+		t.Fatalf("default DNS = %#v", cfg.DNS)
+	}
+	if len(cfg.DNS.Resolvers) != 2 {
+		t.Fatalf("default resolvers = %v", cfg.DNS.Resolvers)
+	}
+
+	tests := []struct {
+		name      string
+		resolvers []string
+	}{
+		{name: "hostname", resolvers: []string{"dns.example.com"}},
+		{name: "ipv6", resolvers: []string{"2606:4700:4700::1111"}},
+		{name: "bad port", resolvers: []string{"1.1.1.1:0"}},
+		{name: "duplicate canonical endpoint", resolvers: []string{"1.1.1.1", "1.1.1.1:53"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			candidate := cfg
+			candidate.DNS.Resolvers = tt.resolvers
+			if err := candidate.Validate(); err == nil {
+				t.Fatal("expected DNS validation failure")
+			}
+		})
+	}
+}
+
+func TestLoadFilesNormalizesLegacyV1DNS(t *testing.T) {
+	dir := t.TempDir()
+	stackPath := filepath.Join(dir, "stack.json")
+	routingPath := filepath.Join(dir, "routing.json")
+
+	stack := DefaultStack("br-lan", "192.168.8.0/24", "eth1", "/usr/share/xray")
+	data, err := json.Marshal(stack)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var legacy map[string]any
+	if err := json.Unmarshal(data, &legacy); err != nil {
+		t.Fatal(err)
+	}
+	delete(legacy, "dns")
+	data, err = json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stackPath, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	routingData, err := json.Marshal(DefaultRouting())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(routingPath, routingData, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, _, err := LoadFiles(stackPath, routingPath)
+	if err != nil {
+		t.Fatalf("legacy v1 manifest failed to load: %v", err)
+	}
+	want := DefaultClientDNS()
+	if loaded.DNS.Mode != want.Mode || loaded.DNS.ListenPort != want.ListenPort ||
+		len(loaded.DNS.Resolvers) != len(want.Resolvers) {
+		t.Fatalf("normalized DNS = %#v, want %#v", loaded.DNS, want)
+	}
+}
+
+func TestNormalizeLegacyVPNModeToCustom(t *testing.T) {
+	cfg := DefaultStack("br-lan", "192.168.8.0/24", "eth1", "/usr/share/xray")
+	cfg.DNS.Mode = "vpn"
+	cfg.DNS.XrayPort = 0
+	normalized := NormalizeStack(cfg)
+	if normalized.DNS.Mode != DNSModeCustom || normalized.DNS.XrayPort != 20178 {
+		t.Fatalf("legacy DNS normalized to %#v", normalized.DNS)
 	}
 }

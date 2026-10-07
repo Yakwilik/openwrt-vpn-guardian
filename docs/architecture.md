@@ -47,6 +47,24 @@ An internal emergency blocked configuration exists for invariant failures. Norma
 
 Policy switching is implemented in Go by atomically replacing the generated policy config, validating it with Xray and restarting only vpn-policy.
 
+## Client DNS
+
+LAN client DNS is separated from router-originated DNS. Guardian always captures LAN TCP/UDP port 53 before the TPROXY classifier and sends it to *vpn-guardian-dns*. The proxy dispatches local OpenWrt names to dnsmasq and applies the selected external DNS mode only to non-local names. Router-originated DNS is not intercepted, so v2rayA can still resolve VPN node hostnames before a tunnel exists and bootstrap cannot depend on the VPN DNS path.
+
+External DNS modes are:
+
+- *system* — external queries are sent to local dnsmasq, which uses the router/WAN DNS configuration;
+- *custom* — external queries are sent to explicitly configured numeric resolver endpoints through the active v2rayA VPN SOCKS backend;
+- *xray* — A/AAAA queries are handled by Xray's built-in DNS module. The DNS module is tagged and its upstream traffic is routed through the active VPN backend. Record types that Xray's DNS hijack does not process are forwarded through the same VPN backend to fixed numeric fallback resolvers, so they do not leak to WAN.
+
+Local names never use the external path. The dispatcher recognizes single-label DHCP hostnames, standard OpenWrt suffixes such as *.lan* and *.home.arpa*, the configured dnsmasq local domain, and domains from dnsmasq static address rules. Private reverse-DNS zones are also kept local. The actual answer is obtained from dnsmasq, preserving DHCP leases and OpenWrt local records.
+
+The default mode is *custom* with *1.1.1.1* and *9.9.9.9*. Custom resolver hostnames are rejected; only numeric IPv4 endpoints, optionally with an explicit port, are accepted, preventing a resolver bootstrap loop. Existing version-1 manifests with the legacy *vpn* mode are normalized to *custom*.
+
+By default *dns.onlyProxyDomains* is enabled. In that mode the DNS dispatcher uses the same domain rules as vpn-front, including geosite/full/domain/regexp entries: matching names use Custom/Xray while other public names use system dnsmasq. IP/CIDR and GeoIP rules cannot classify a DNS name before resolution and therefore do not affect this DNS scope. Disabling the switch sends every non-local name through Custom/Xray.
+
+The management UI can change *system/custom/xray*, the Custom resolver list and the selective-domain switch. DNS policy and routing-domain changes are hot-reloaded through the DNS control socket without restarting vpn-front, vpn-policy or v2rayA. The separate *vpn-dns-xray* process is started only in Xray mode and stopped in System/Custom. A full stack apply is not required.
+
 ## v2rayA backend
 
 v2rayA owns subscriptions, node definitions and the selected VPN connection.
@@ -104,7 +122,7 @@ It records:
 - direct and VPN egress IPs;
 - health probe results;
 - candidate count and total node count;
-- stack/service state;
+- stack/service state, including client DNS readiness;
 - policy mode;
 - recent failures and switches;
 - history samples.
@@ -143,6 +161,8 @@ Automation may use a separate service API key via the standard *Authorization: B
 
 The management UI exposes the transport allowlist from *selection.allowedTransports*. Updates are validated against the shared transport catalogue and the current v2rayA database before *stack.json* is replaced atomically. An empty allowlist or a selection with no eligible nodes is rejected. If the new allowlist excludes a pinned node, the pin is released and control returns to Auto before the watchdog immediately re-evaluates the active backend.
 
+Client external-DNS mode and Custom upstream resolvers are editable from the management UI. The API applies DNS changes under the shared mutation lock with backup and rollback; router-originated DNS is unaffected.
+
 Routing is also editable from the management UI as typed rules: geosite, suffix domain, full domain, regexp, IP/CIDR and GeoIP. Each rule may carry a short human-readable note explaining why it exists; notes are persisted in the routing manifest and returned by the API. The API validates rule type/value, note length and duplicate/orphan metadata, then converts the rules to the existing *proxyDomains*/*proxyIps* runtime format. Applying routing regenerates and validates the Xray configuration, snapshots the previous state, atomically replaces *routing.json* and *front.json*, and restarts only *vpn-front*. A failed restart restores the previous snapshot.
 
 The explicit Telegram IPv4/IPv6 routes in the deployed configuration mirror Telegram's official CIDR list at *https://core.telegram.org/resources/cidr.txt*. They complement the Telegram geosite rule for clients or protocol flows that connect to Telegram infrastructure by IP instead of relying on DNS/SNI matching.
@@ -174,9 +194,10 @@ The self-test checks:
 - nftables front table;
 - policy rule and route table;
 - absence of a global LAN blackhole;
-- required services;
+- required services, including the client DNS proxy in VPN DNS mode;
 - direct egress;
 - backend VPN egress;
+- client DNS resolution through the local DNS proxy without consulting the system resolver;
 - fail-open behavior with a dead backend;
 - VPN-only fail-closed behavior;
 - emergency blocked behavior.

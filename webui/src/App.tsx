@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { ControlPanel } from "./components/ControlPanel";
+import { DNSPanel } from "./components/DNSPanel";
 import { ConfirmDialog, ManageDialog, SubscriptionDialog } from "./components/Dialogs";
 import { EventsPanel } from "./components/EventsPanel";
 import { HeaderBar } from "./components/HeaderBar";
@@ -13,7 +14,7 @@ import { SubscriptionsPanel } from "./components/SubscriptionsPanel";
 import { TrafficPath } from "./components/TrafficPath";
 import { useControlActions } from "./hooks/useControlActions";
 import { useDashboardData } from "./hooks/useDashboardData";
-import type { NodeInfo, RoutingRule, SubscriptionInfo } from "./types";
+import type { DNSMode, NodeInfo, RoutingRule, SubscriptionInfo } from "./types";
 
 interface ConfirmState {
   title: string;
@@ -96,7 +97,7 @@ export default function App() {
   async function switchNode(node: NodeInfo) {
     await actions.controlAction(
       "switch",
-      { id: node.id, sub: node.sub },
+      { id: node.id, sub: node.sub, nodeKey: node.key },
       `Активна нода: ${node.name}`,
     );
   }
@@ -104,7 +105,7 @@ export default function App() {
   async function pinNode(node: NodeInfo) {
     await actions.controlAction(
       "pin",
-      { id: node.id, sub: node.sub },
+      { id: node.id, sub: node.sub, nodeKey: node.key },
       `Pinned: ${node.name}`,
     );
   }
@@ -177,6 +178,14 @@ export default function App() {
     );
   }
 
+  async function updateDNS(mode: DNSMode, resolvers: string[], onlyProxyDomains: boolean) {
+    await actions.controlAction(
+      "dns",
+      { dnsMode: mode, dnsResolvers: resolvers, dnsOnlyProxyDomains: onlyProxyDomains },
+      "DNS-настройки обновлены",
+    );
+  }
+
   function restartService(service: "v2raya") {
     ask({
       title: `Перезапустить ${service}?`,
@@ -236,6 +245,7 @@ export default function App() {
             latency={actions.latency}
             busy={actions.busy}
             onLatency={() => void actions.testLatency()}
+ onReselect={() => void actions.controlAction("reselect", {}, "Подобрана другая подходящая нода")}
             onSwitch={(node) => void switchNode(node)}
             onPin={(node) => void pinNode(node)}
           />
@@ -243,6 +253,11 @@ export default function App() {
             control={dashboard.control}
             busy={actions.busy}
             onSave={updateRouting}
+          />
+          <DNSPanel
+            control={dashboard.control}
+            busy={actions.busy}
+            onSave={updateDNS}
           />
         </div>
 

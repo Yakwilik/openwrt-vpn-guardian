@@ -59,9 +59,13 @@ func TestListCandidatesAppliesPolicyAndStableTouchMapping(t *testing.T) {
 	}
 	want := []Candidate{
 		{TouchID: 1, Sub: 1, SubscriptionID: 5, Priority: 40, Sort: 0, Name: "allowed-xhttp", Protocol: "vless", Network: "xhttp", Security: "reality", Address: "xhttp.example:443"},
-		{TouchID: 6, Sub: 0, SubscriptionID: 9, Priority: 105, Sort: 5, Name: "allowed-tcp", Protocol: "vless", Network: "tcp", Security: "reality", Address: "tcp.example:8443"},
+		{TouchID: 3, Sub: 0, SubscriptionID: 9, Priority: 105, Sort: 5, Name: "allowed-tcp", Protocol: "vless", Network: "tcp", Security: "reality", Address: "tcp.example:8443"},
 	}
 	for i := range want {
+		if got[i].Key == "" {
+			t.Fatal("missing stable node key")
+		}
+		want[i].Key = got[i].Key
 		if got[i] != want[i] {
 			t.Errorf("candidate %d = %+v, want %+v", i, got[i], want[i])
 		}

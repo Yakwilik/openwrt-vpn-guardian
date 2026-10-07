@@ -1,14 +1,16 @@
 package paths
 
 const (
-	ConfigDir         = "/etc/vpn-guardian"
-	StackConfig       = ConfigDir + "/stack.json"
-	RoutingConfig     = ConfigDir + "/routing.json"
-	ControlConfig     = ConfigDir + "/control.json"
-	AuthConfig        = ConfigDir + "/auth.json"
-	ServiceAuthConfig = ConfigDir + "/service-auth.json"
-	BackupDir         = ConfigDir + "/backups"
-	BootstrapMarker   = ConfigDir + "/bootstrap-complete"
+	DNSXrayConfig      = GeneratedDir + "/dns-xray.json"
+	DNSXrayServiceInit = "/etc/init.d/vpn-dns-xray"
+	ConfigDir          = "/etc/vpn-guardian"
+	StackConfig        = ConfigDir + "/stack.json"
+	RoutingConfig      = ConfigDir + "/routing.json"
+	ControlConfig      = ConfigDir + "/control.json"
+	AuthConfig         = ConfigDir + "/auth.json"
+	ServiceAuthConfig  = ConfigDir + "/service-auth.json"
+	BackupDir          = ConfigDir + "/backups"
+	BootstrapMarker    = ConfigDir + "/bootstrap-complete"
 
 	GeneratedDir   = ConfigDir + "/generated"
 	FrontConfig    = GeneratedDir + "/front.json"
@@ -38,6 +40,7 @@ const (
 	FrontRoutingInit     = "/etc/init.d/vpn-front-routing"
 	WatchdogServiceInit  = "/etc/init.d/vpn-backend-watchdog"
 	CollectorServiceInit = "/etc/init.d/vpn-dashboard-collector"
+	DNSServiceInit       = "/etc/init.d/vpn-guardian-dns"
 	APIServiceInit       = "/etc/init.d/vpn-guardian-api"
 	BootstrapServiceInit = "/etc/init.d/vpn-guardian-bootstrap"
 	FrontRoutingHotplug  = "/etc/hotplug.d/iface/99-vpn-front-routing"

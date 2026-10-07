@@ -17,6 +17,14 @@ export function HealthGrid({ status }: HealthGridProps) {
         <span className="panel-counter">{status?.health_count ?? 0}/4</span>
       </div>
 
+      <div className="dns-health-list">
+       {Object.entries(status?.dns_checks ?? {}).map(([key,check]) => (
+        <div className="service-card" key={key} title={check.error || check.name}>
+         <span className={`mini-dot ${check.ok ? "is-up" : "is-down"}`} />
+         <span>DNS · {check.name}</span><strong>{check.ok ? `${check.ms} ms` : check.rcode || "timeout"}</strong>
+        </div>
+       ))}
+      </div>
       <div className="health-grid">
         {checks.length === 0 && <div className="empty">Проверки ещё не загружены</div>}
         {checks.map(([name, check]) => {

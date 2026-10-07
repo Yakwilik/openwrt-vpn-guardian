@@ -62,3 +62,16 @@ func TestDBStatusCountsOnlyConfiguredCandidates(t *testing.T) {
 		t.Fatalf("settings=(%q,%q), want close/none", transparent, pacMode)
 	}
 }
+
+func TestOverallStatusRequiresClientDNS(t *testing.T) {
+	healthy := HealthResult{Status: "healthy"}
+	if got := overallStatus(Control{Mode: "auto", FailurePolicy: "killswitch"}, healthy, true, false); got != "down" {
+		t.Fatalf("overallStatus with broken DNS = %q, want down", got)
+	}
+	if got := overallStatus(Control{Mode: "direct", FailurePolicy: "killswitch"}, healthy, true, false); got != "down" {
+		t.Fatalf("direct mode with broken intercepted DNS = %q, want down", got)
+	}
+	if got := overallStatus(Control{Mode: "direct", FailurePolicy: "killswitch"}, healthy, true, true); got != "direct" {
+		t.Fatalf("healthy direct mode = %q, want direct", got)
+	}
+}
