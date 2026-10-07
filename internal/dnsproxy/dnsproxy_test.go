@@ -113,17 +113,9 @@ func TestModeAndRoutingIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	local := newMatcher()
-	local.suffix["home.arpa"] = struct{}{}
-	local.full["console.gl-inet.com"] = struct{}{}
 	for _, mode := range []string{"system", "custom", "xray"} {
 		for _, only := range []bool{false, true} {
-			rt := &Runtime{Mode: mode, OnlyProxyDomains: only, Matcher: matcher, Local: local}
-			for _, name := range []string{"vpn.home.arpa", "printer", "console.gl-inet.com"} {
-				if rt.route(name) != "local" {
-					t.Fatalf("local leaked: %s %v %s", mode, only, name)
-				}
-			}
+			rt := &Runtime{Mode: mode, OnlyProxyDomains: only, Matcher: matcher}
 			want := "proxy"
 			if mode == "system" {
 				want = "system"
@@ -147,7 +139,7 @@ func TestProxyFailoverAndNoSystemFallback(t *testing.T) {
 	system := testDNS(t, func(w dns.ResponseWriter, q *dns.Msg) { systemCalls.Add(1); answer(w, q) })
 	upstream := testDNS(t, answer)
 	socks := testSOCKS(t, upstream, &proxyCalls)
-	rt := &Runtime{Mode: "custom", SystemResolver: system, SOCKSAddr: socks, Resolvers: []string{"1.1.1.1:1", "9.9.9.9:53"}}
+	rt := &Runtime{Mode: "custom", SystemResolvers: []string{system}, SOCKSAddr: socks, Resolvers: []string{"1.1.1.1:1", "9.9.9.9:53"}}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	got, err := rt.exchange(ctx, query("youtube.com"), "proxy")
@@ -164,7 +156,7 @@ func TestProxyFailoverAndNoSystemFallback(t *testing.T) {
 	if systemCalls.Load() != 0 {
 		t.Fatal("proxy DNS leaked into system")
 	}
-	if _, err := rt.exchange(ctx, query("printer.lan"), "local"); err != nil {
+	if _, err := rt.exchange(ctx, query("example.net"), "system"); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -180,32 +172,6 @@ func TestNegativeAnswerNotRewritten(t *testing.T) {
 	r, err := rt.exchange(context.Background(), query("absent.example"), "proxy")
 	if err != nil || r.Rcode != dns.RcodeNameError || calls.Load() != 1 {
 		t.Fatalf("NXDOMAIN changed: %v %v", r, err)
-	}
-}
-
-func TestLocalDiscoveryHostsLeasesAndSplitHorizon(t *testing.T) {
-	root := t.TempDir()
-	files := map[string]string{
-		"var/etc/dnsmasq.conf.main": "domain=corp.home\nlocal=/corp.home/\nserver=/intranet.example/192.168.1.254\naddress=/a.home/b.home/192.168.8.1\naddn-hosts=/tmp/hosts\n",
-		"tmp/hosts/dhcp":            "192.168.8.1 console.gl-inet.com router.corp.home\n",
-		"tmp/dhcp.leases":           "9999999999 00:00:00:00:00:01 192.168.8.9 custom.hostname.example *\n",
-	}
-	for p, v := range files {
-		p = filepath.Join(root, p)
-		os.MkdirAll(filepath.Dir(p), 0755)
-		os.WriteFile(p, []byte(v), 0600)
-	}
-	m, err := LocalNames(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, name := range []string{"printer", "host.corp.home", "a.home", "b.home", "console.gl-inet.com", "custom.hostname.example", "app.intranet.example"} {
-		if !isLocalName(m, name) {
-			t.Errorf("not local: %s", name)
-		}
-	}
-	if isLocalName(m, "youtube.com") {
-		t.Fatal("public name treated local")
 	}
 }
 
@@ -243,7 +209,7 @@ func TestWireUDPTruncationTCPAndMalformed(t *testing.T) {
 		}
 		w.WriteMsg(r)
 	})
-	server := newServer(&Runtime{Mode: "system", SystemResolver: upstream, Local: newMatcher(), Matcher: newMatcher()})
+	server := newServer(&Runtime{Mode: "system", SystemResolvers: []string{upstream}, Matcher: newMatcher()})
 	addr := testDNS(t, server.ServeDNS)
 	q := new(dns.Msg).SetQuestion("example.com.", dns.TypeTXT)
 	udp := &dns.Client{Net: "udp"}

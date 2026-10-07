@@ -15,8 +15,10 @@ import (
 	"time"
 
 	"github.com/Yakwilik/openwrt-vpn-guardian/internal/config"
+	"github.com/Yakwilik/openwrt-vpn-guardian/internal/dnsfront"
 	"github.com/Yakwilik/openwrt-vpn-guardian/internal/netstate"
 	"github.com/Yakwilik/openwrt-vpn-guardian/internal/paths"
+	"github.com/Yakwilik/openwrt-vpn-guardian/internal/policy"
 	v2rayautil "github.com/Yakwilik/openwrt-vpn-guardian/internal/v2raya"
 
 	"golang.org/x/net/proxy"
@@ -105,6 +107,8 @@ type Status struct {
 	PACMode             string                 `json:"pac_mode"`
 	DesiredTransparent  string                 `json:"desired_transparent"`
 	TProxyActive        bool                   `json:"tproxy_active"`
+	DNSFrontend         string                 `json:"dns_frontend"`
+	DNSRuntimePolicy    string                 `json:"dns_runtime_policy"`
 	DNSMode             string                 `json:"dns_mode"`
 	DNSReady            bool                   `json:"dns_ready"`
 	DNSIntercept        bool                   `json:"dns_intercept"`
@@ -241,14 +245,14 @@ func collectSnapshot(rt *runtimeState) (Status, error) {
 		API:       serviceState("vpn-guardian-api"),
 	}
 	out.DNSMode = stack.DNS.Mode
+	out.DNSFrontend = "dnsmasq"
+	out.DNSRuntimePolicy = policy.DNSRuntimeAt("/")
 	out.Services.DNS = serviceState("vpn-guardian-dns")
 	out.DNSIntercept = commandContains("nft", []string{"list", "table", "inet", "vpn_front"}, "chain dns_redirect")
-	out.DNSReady = out.Services.DNS == "running" &&
+	out.DNSReady = out.Services.DNS == "running" && serviceState("dnsmasq") == "running" && dnsfront.Check(stack.DNS.ListenPort) == nil &&
 		portReady(fmt.Sprintf("127.0.0.1:%d", stack.DNS.ListenPort)) &&
 		out.DNSIntercept
-	if stack.DNS.Mode == config.DNSModeXray {
-		out.DNSReady = out.DNSReady && portReady(fmt.Sprintf("127.0.0.1:%d", stack.DNS.XrayPort))
-	}
+
 	out.TProxy = inspectTProxy(stack)
 	out.TProxyActive = out.TProxy.NFT && out.TProxy.Policy && out.TProxy.Route && out.TProxy.FrontPort
 

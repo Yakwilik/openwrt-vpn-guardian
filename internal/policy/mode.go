@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Yakwilik/openwrt-vpn-guardian/internal/dnsfront"
 	"github.com/Yakwilik/openwrt-vpn-guardian/internal/paths"
 )
 
@@ -65,7 +66,10 @@ func Apply(mode string) error {
 			return err
 		}
 	}
-	return writeAtomic(paths.PolicyRuntime, []byte(mode+"\n"), 0600)
+	if err := writeAtomic(paths.PolicyRuntime, []byte(mode+"\n"), 0600); err != nil {
+		return err
+	}
+	return dnsfront.ClearCache()
 }
 
 func validPublicMode(mode string) bool {

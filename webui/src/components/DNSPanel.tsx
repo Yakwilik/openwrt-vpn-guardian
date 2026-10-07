@@ -37,13 +37,13 @@ export function DNSPanel({
   const serverMode = normalizeMode(control?.dns?.mode);
   const serverResolvers = control?.dns?.resolvers ?? [];
   const serverOnlyProxy = control?.dns?.onlyProxyDomains ?? true;
- const [onlyProxy, setOnlyProxy] = useState(serverOnlyProxy);
- const [mode, setMode] = useState<DNSMode>(serverMode);
+  const [onlyProxy, setOnlyProxy] = useState(serverOnlyProxy);
+  const [mode, setMode] = useState<DNSMode>(serverMode);
   const [resolverText, setResolverText] = useState(formatResolvers(serverResolvers));
 
   useEffect(() => {
     setMode(serverMode);
- setOnlyProxy(serverOnlyProxy);
+    setOnlyProxy(serverOnlyProxy);
     setResolverText(formatResolvers(serverResolvers));
   }, [serverMode, serverOnlyProxy, serverResolvers.join("|")]);
 
@@ -54,7 +54,7 @@ export function DNSPanel({
 
   function reset() {
     setMode(serverMode);
- setOnlyProxy(serverOnlyProxy);
+    setOnlyProxy(serverOnlyProxy);
     setResolverText(formatResolvers(serverResolvers));
   }
 
@@ -63,7 +63,7 @@ export function DNSPanel({
       <div className="panel-heading">
         <div>
           <h2>DNS клиентов</h2>
-          <p>Внешний DNS для LAN. Локальные имена всегда остаются в dnsmasq.</p>
+          <p>dnsmasq принимает запросы LAN. Guardian — только внешний upstream.</p>
         </div>
         <span className="panel-counter">{modeLabel(serverMode)}</span>
       </div>
@@ -89,11 +89,11 @@ export function DNSPanel({
           </div>
           <div className="inline-note">
             {mode === "system" &&
-              "Внешние запросы идут в системный dnsmasq/WAN DNS. Локальные домены OpenWrt и DHCP-hostnames также обслуживает dnsmasq."}
+              "Внешние запросы идут напрямую к системным/WAN resolver-ам. Обратного запроса в dnsmasq нет."}
             {mode === "custom" &&
-              "Внешние запросы выбранной области идут к заданным resolver-ам через активный VPN. При отказе VPN они не отправляются в системный DNS."}
+              "Для выбранных доменов используются заданные resolver-ы через VPN. DNS наследует VPN-only, Fail-open и Direct."}
             {mode === "xray" &&
-              "Внешние A/AAAA-запросы выбранной области обрабатывает отдельный DNS-процесс Xray через активный VPN. Он не меняет DNS direct-выхода; другие типы записей передаются через VPN без подмены."}
+              "A/AAAA выбранных доменов обрабатывает DNS Xray через VPN. Остальные типы передаются через VPN. Политика отказа такая же, как у Custom."}
           </div>
         </div>
 
@@ -121,11 +121,17 @@ export function DNSPanel({
         DNS через VPN только для проксируемых доменов
       </label>
       <p className="inline-note">{onlyProxy
-        ? "Включено: домены из routing (включая geosite) используют Custom/Xray, остальные — системный dnsmasq. IP-only правила не определяют DNS-политику имени."
+        ? "Включено: домены из routing (включая geosite) используют Custom/Xray, остальные — прямые системные/WAN resolver-ы. IP-only правила не определяют DNS-политику имени."
         : "Выключено: Custom/Xray используется для всех внешних доменов. Локальные имена остаются в dnsmasq."}</p>
       <div className="inline-note dns-local-note">
-        Независимо от выбранного режима запросы к *.lan, *.home.arpa, настроенному локальному домену OpenWrt, статическим dnsmasq address-записям и single-label DHCP-hostnames отправляются только в локальный dnsmasq.
+        Локальные зоны и DHCP-имена обслуживает сам dnsmasq — до обращения к Guardian. При остановке Guardian локальный DNS продолжает работать.
       </div>
+
+      <p className="inline-note dns-local-note">
+        VPN-only: ошибка защищённого DNS → SERVFAIL, без выхода напрямую.
+        Fail-open: при отказе VPN DNS → системный upstream.
+        Direct: сразу системный upstream. Локальный DNS и bootstrap роутера от VPN не зависят.
+      </p>
 
       {canManage && (
         <div className="routing-footer">

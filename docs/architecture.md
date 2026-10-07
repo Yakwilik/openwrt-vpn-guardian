@@ -49,21 +49,36 @@ Policy switching is implemented in Go by atomically replacing the generated poli
 
 ## Client DNS
 
-LAN client DNS is separated from router-originated DNS. Guardian always captures LAN TCP/UDP port 53 before the TPROXY classifier and sends it to *vpn-guardian-dns*. The proxy dispatches local OpenWrt names to dnsmasq and applies the selected external DNS mode only to non-local names. Router-originated DNS is not intercepted, so v2rayA can still resolve VPN node hostnames before a tunnel exists and bootstrap cannot depend on the VPN DNS path.
+The client entry point is native dnsmasq on port 53. Guardian captures ordinary LAN TCP/UDP DNS before TPROXY and redirects it to port 53, not to its own upstream listener. Both existing DNAT bypass rules are retained. Native dnsmasq answers local zones, DHCP names and local negative answers before consulting an upstream. The external resolver contains no DHCP lease reader, hosts classifier or local-name polling loop.
 
-External DNS modes are:
+~~~text
+LAN -> dnsmasq:53 -> local answer
+                  -> Guardian 127.0.0.1:20176 -> external DNS policy
+router/VPN bootstrap -> original system DNS + current WAN DNS
+~~~
 
-- *system* — external queries are sent to local dnsmasq, which uses the router/WAN DNS configuration;
-- *custom* — external queries are sent to explicitly configured numeric resolver endpoints through the active v2rayA VPN SOCKS backend;
-- *xray* — A/AAAA queries are handled by Xray's built-in DNS module. The DNS module is tagged and its upstream traffic is routed through the active VPN backend. Record types that Xray's DNS hijack does not process are forwarded through the same VPN backend to fixed numeric fallback resolvers, so they do not leak to WAN.
+Guardian listens only on loopback and is dnsmasq's sole default upstream. dnsmasq uses *no-resolv* for client forwarding; its internal split-horizon zone servers remain native. Original system resolver endpoints are saved separately from the managed dnsmasq settings. Guardian's direct DNS path reads those original endpoints and the live netifd resolver file; it never sends a query back into dnsmasq. Numeric validation rejects loopback, unspecified and router-owned addresses to prevent recursion.
 
-Local names never use the external path. The dispatcher recognizes single-label DHCP hostnames, standard OpenWrt suffixes such as *.lan* and *.home.arpa*, the configured dnsmasq local domain, and domains from dnsmasq static address rules. Private reverse-DNS zones are also kept local. The actual answer is obtained from dnsmasq, preserving DHCP leases and OpenWrt local records.
+External DNS modes are *system* (real system/WAN upstreams), *custom* (configured numeric upstreams through the active VPN backend), and *xray* (the separate DNS-only Xray process through the active VPN backend). Xray-mode record types not handled by its built-in A/AAAA resolver are forwarded through the VPN backend without record-type substitution. System mode explicitly selects direct DNS.
 
-The default mode is *custom* with *1.1.1.1* and *9.9.9.9*. Custom resolver hostnames are rejected; only numeric IPv4 endpoints, optionally with an explicit port, are accepted, preventing a resolver bootstrap loop. Existing version-1 manifests with the legacy *vpn* mode are normalized to *custom*.
+By default *dns.onlyProxyDomains* is enabled. The external resolver matches the same geosite/full/domain/regexp rules as vpn-front. Matching external names use the selected Custom/Xray mode; unmatched names use system DNS. Disabling the switch applies Custom/Xray to all external names. IP/CIDR and GeoIP rules do not classify an unresolved DNS name.
 
-By default *dns.onlyProxyDomains* is enabled. In that mode the DNS dispatcher uses the same domain rules as vpn-front, including geosite/full/domain/regexp entries: matching names use Custom/Xray while other public names use system dnsmasq. IP/CIDR and GeoIP rules cannot classify a DNS name before resolution and therefore do not affect this DNS scope. Disabling the switch sends every non-local name through Custom/Xray.
+Custom/Xray requests obey the intersection of requested control state and applied runtime policy:
 
-The management UI can change *system/custom/xray*, the Custom resolver list and the selective-domain switch. DNS policy and routing-domain changes are hot-reloaded through the DNS control socket without restarting vpn-front, vpn-policy or v2rayA. The separate *vpn-dns-xray* process is started only in Xray mode and stopped in System/Custom. A full stack apply is not required.
+| Runtime policy | Protected DNS behavior |
+|---|---|
+| VPN-only | VPN DNS; transport failure or SERVFAIL/REFUSED fails closed. |
+| Fail-open | VPN DNS first; failure gets a separate budget for system DNS. |
+| Direct | System DNS immediately, without a VPN attempt. |
+| Emergency blocked or unreadable policy | No direct fallback. |
+
+Policy is reread before a fallback and before delivering its result. NXDOMAIN and successful empty answers are terminal DNS results, not failover triggers. Direct/fallback answers for protected names have zero TTL; changing DNS settings or policy clears native caches with a procd-delivered HUP, not a DNS/DHCP restart. Using procd is important with jailed dnsmasq: a pidfile may contain PID 1 from a different PID namespace.
+
+The bootstrap resolver is independent of both the Guardian daemon and the tunnel. A small native init/hotplug shell script combines the original static system DNS addresses with current WAN DNS into */tmp/vpn-guardian-resolv.conf*. */tmp/resolv.conf* points there, and dnsmasq *localuse=0* prevents replacement by a loopback resolver. The script performs no DNS lookups and requires neither a running Guardian process nor VPN connectivity. Static system servers are retained because WAN-advertised resolvers can be unavailable. The WAN refresh path also excludes router-owned addresses.
+
+Native no-forward zone configuration is persistent and mounted into the dnsmasq jail. Initial migration changes only integration-owned dnsmasq options, keeps a restoration snapshot and starts the loopback upstream before activating client forwarding. On GL.iNet, a narrowly scoped loopback mark handles vendor rules that otherwise drop TCP from the dnsmasq UID; no public destination is marked and the vendor firewall table is not rewritten.
+
+Admin changes to DNS mode, upstreams and selective scope hot-reload Guardian without restarting dnsmasq, vpn-front, vpn-policy or v2rayA. Only the optional DNS-only Xray process is started/stopped when required. Routing changes still restart vpn-front as before and reload the external DNS matcher. Cleanup restores the original dnsmasq settings and bootstrap resolver before removing the upstream service.
 
 ## v2rayA backend
 
@@ -161,7 +176,7 @@ Automation may use a separate service API key via the standard *Authorization: B
 
 The management UI exposes the transport allowlist from *selection.allowedTransports*. Updates are validated against the shared transport catalogue and the current v2rayA database before *stack.json* is replaced atomically. An empty allowlist or a selection with no eligible nodes is rejected. If the new allowlist excludes a pinned node, the pin is released and control returns to Auto before the watchdog immediately re-evaluates the active backend.
 
-Client external-DNS mode and Custom upstream resolvers are editable from the management UI. The API applies DNS changes under the shared mutation lock with backup and rollback; router-originated DNS is unaffected.
+Client external-DNS mode and Custom upstream resolvers are editable from the management UI. The API applies DNS changes under the shared mutation lock with backup and rollback; runtime DNS setting changes do not modify the independent router bootstrap resolver.
 
 Routing is also editable from the management UI as typed rules: geosite, suffix domain, full domain, regexp, IP/CIDR and GeoIP. Each rule may carry a short human-readable note explaining why it exists; notes are persisted in the routing manifest and returned by the API. The API validates rule type/value, note length and duplicate/orphan metadata, then converts the rules to the existing *proxyDomains*/*proxyIps* runtime format. Applying routing regenerates and validates the Xray configuration, snapshots the previous state, atomically replaces *routing.json* and *front.json*, and restarts only *vpn-front*. A failed restart restores the previous snapshot.
 
@@ -194,10 +209,10 @@ The self-test checks:
 - nftables front table;
 - policy rule and route table;
 - absence of a global LAN blackhole;
-- required services, including the client DNS proxy in VPN DNS mode;
+- required services, including native dnsmasq and its loopback external upstream;
 - direct egress;
 - backend VPN egress;
-- client DNS resolution through the local DNS proxy without consulting the system resolver;
+- client DNS resolution through native dnsmasq, the actual client entry point;
 - fail-open behavior with a dead backend;
 - VPN-only fail-closed behavior;
 - emergency blocked behavior.
@@ -226,7 +241,7 @@ vpn-guardian intentionally keeps only the external components that would be unre
 - CA roots;
 - geosite data.
 
-nginx and dnsmasq integrations are optional conveniences.
+nginx dashboard integration is optional. Native dnsmasq integration is part of the client DNS architecture.
 
 
 ## Front recovery and operational boundaries

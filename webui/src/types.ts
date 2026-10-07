@@ -32,6 +32,8 @@ export interface StatusSnapshot {
   desired_transparent: string;
   tproxy_active: boolean;
   dns_mode: string;
+  dns_frontend: string;
+  dns_runtime_policy: string;
   dns_ready: boolean;
  dns_healthy: boolean;
  dns_only_proxy_domains: boolean;

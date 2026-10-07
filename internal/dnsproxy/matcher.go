@@ -14,11 +14,10 @@ import (
 // the Xray front. IP-only routing rules cannot classify a DNS question before
 // it is resolved and deliberately do not become DNS domain rules.
 type DomainMatcher struct {
-	internalForward map[string]bool
-	full            map[string]struct{}
-	suffix          map[string]struct{}
-	plain           []string
-	regex           []*regexp.Regexp
+	full   map[string]struct{}
+	suffix map[string]struct{}
+	plain  []string
+	regex  []*regexp.Regexp
 }
 
 func newMatcher() *DomainMatcher {

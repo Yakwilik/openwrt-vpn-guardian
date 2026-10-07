@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/Yakwilik/openwrt-vpn-guardian/internal/config"
+	"github.com/Yakwilik/openwrt-vpn-guardian/internal/dnsfront"
 	"github.com/Yakwilik/openwrt-vpn-guardian/internal/dnsproxy"
 	"github.com/Yakwilik/openwrt-vpn-guardian/internal/lockfile"
 	"github.com/Yakwilik/openwrt-vpn-guardian/internal/paths"
@@ -540,18 +541,19 @@ func makeNFT(s Stack) string {
 		b.WriteString(x)
 	}
 	b.WriteString(" }\n  }\n")
-	// All LAN DNS is captured before TPROXY so local names and the selected
-	// external DNS policy are enforced consistently. Router-originated DNS is
-	// not in this hook and remains available for VPN bootstrap.
+	// DNS clients always reach native dnsmasq, never the Guardian upstream.
 	b.WriteString("  chain dns_redirect {\n    type nat hook prerouting priority -170; policy accept;\n")
-	fmt.Fprintf(&b, "    iifname %q ip saddr %s udp dport 53 redirect to :%d\n", s.LANInterface, s.LANCIDR, s.DNS.ListenPort)
-	fmt.Fprintf(&b, "    iifname %q ip saddr %s tcp dport 53 redirect to :%d\n", s.LANInterface, s.LANCIDR, s.DNS.ListenPort)
-	fmt.Fprintf(&b, "    iifname %q meta nfproto ipv6 udp dport 53 redirect to :%d\n", s.LANInterface, s.DNS.ListenPort)
-	fmt.Fprintf(&b, "    iifname %q meta nfproto ipv6 tcp dport 53 redirect to :%d\n", s.LANInterface, s.DNS.ListenPort)
-	b.WriteString("  }\n  chain dns_input {\n    type filter hook input priority filter - 10; policy accept;\n")
-	fmt.Fprintf(&b, "    iifname %q ip saddr %s udp dport %d accept\n", s.LANInterface, s.LANCIDR, s.DNS.ListenPort)
-	fmt.Fprintf(&b, "    iifname %q ip saddr %s tcp dport %d accept\n", s.LANInterface, s.LANCIDR, s.DNS.ListenPort)
+	fmt.Fprintf(&b, "    iifname %q ip saddr %s udp dport 53 redirect to :53\n", s.LANInterface, s.LANCIDR)
+	fmt.Fprintf(&b, "    iifname %q ip saddr %s tcp dport 53 redirect to :53\n", s.LANInterface, s.LANCIDR)
+	fmt.Fprintf(&b, "    iifname %q meta nfproto ipv6 udp dport 53 redirect to :53\n", s.LANInterface)
+	fmt.Fprintf(&b, "    iifname %q meta nfproto ipv6 tcp dport 53 redirect to :53\n", s.LANInterface)
 	b.WriteString("  }\n")
+	// GL.iNet may reject unmarked TCP from the dnsmasq UID before its own
+	// loopback accept rule. Permit only DNS on lo by using the vendor's existing
+	// local/WAN class bit; never mark a public destination or alter fw4 itself.
+	b.WriteString("  chain dns_loopback {\n    type filter hook output priority filter - 20; policy accept;\n")
+	fmt.Fprintf(&b, "    oifname \"lo\" ip daddr 127.0.0.1 tcp dport %d meta mark set meta mark | 0x8000\n", s.DNS.ListenPort)
+	b.WriteString("    oifname \"lo\" ip saddr 127.0.0.1 tcp sport 53 meta mark set meta mark | 0x8000\n  }\n")
 	b.WriteString("  chain prerouting {\n")
 	b.WriteString("    type filter hook prerouting priority mangle - 10; policy accept;\n")
 	fmt.Fprintf(&b, "    iifname %q ip saddr %s ct status dnat return\n", s.LANInterface, s.LANCIDR)
@@ -851,7 +853,7 @@ func ApplyRouting(r config.Routing) error {
 	if err := dnsproxy.Reload(context.Background()); err != nil {
 		return rollback(err)
 	}
-	return nil
+	return dnsfront.ClearCache()
 }
 
 // ApplyDNS updates only LAN client DNS policy. Router-originated DNS remains
@@ -876,7 +878,7 @@ func ApplyDNS(mode string, resolvers []string, onlyProxy *bool) error {
 	}
 
 	s.DNS.Mode = strings.TrimSpace(mode)
-	s.DNS.Resolvers = append([]string(nil), resolvers...)
+	s.DNS.Resolvers = append([]string{}, resolvers...)
 	if onlyProxy != nil {
 		s.DNS.OnlyProxyDomains = onlyProxy
 	}
@@ -915,6 +917,9 @@ func ApplyDNS(mode string, resolvers []string, onlyProxy *bool) error {
 		if err := syncDNSXrayService(s); err != nil {
 			return rollback(fmt.Errorf("apply DNS Xray lifecycle: %w", err))
 		}
+	}
+	if err := dnsfront.ClearCache(); err != nil {
+		return rollback(fmt.Errorf("clear native DNS cache: %w", err))
 	}
 	return nil
 }
@@ -961,6 +966,9 @@ func cleanupCmd() error {
 	if os.Geteuid() != 0 {
 		return errors.New("cleanup must run as root")
 	}
+	if err := dnsfront.Restore(); err != nil {
+		return err
+	}
 	cleanupGeneratedRuntime()
 	_ = os.Remove(bootstrapMarker)
 	fmt.Println("cleanup OK")
@@ -974,7 +982,7 @@ func cleanupGeneratedRuntime() {
 			_, _ = run(initPath, "stop")
 		}
 	}
-	_ = dnsproxy.RemoveLocalGuards()
+	_ = dnsfront.Restore()
 
 	_ = exec.Command("nft", "delete", "table", "inet", "vpn_front").Run()
 	for i := 0; i < 4; i++ {
@@ -1064,6 +1072,9 @@ func restartStack() error {
 	if err != nil {
 		return err
 	}
+	if _, err := dnsfront.Prepare(); err != nil {
+		return err
+	}
 	mode := strings.TrimSpace(readFile(paths.PolicyMode))
 	if mode != "killswitch" && mode != "failopen" && mode != "direct" {
 		mode = s.Policy.Default
@@ -1084,6 +1095,9 @@ func restartStack() error {
 		}
 	}
 	if err := startDNSProxy(s); err != nil {
+		return err
+	}
+	if err := dnsfront.Configure(s.DNS.ListenPort); err != nil {
 		return err
 	}
 	if out, err := run(paths.FrontRoutingInit, "restart"); err != nil {
@@ -1151,6 +1165,7 @@ func readFile(path string) string {
 }
 
 var backupFiles = []string{
+	dnsfront.StatePath, dnsfront.LocalConfigPath, dnsfront.BootstrapInit, dnsfront.BootstrapStatic, dnsfront.BootstrapHotplug,
 	paths.DNSXrayConfig, paths.DNSXrayServiceInit,
 	paths.StackConfig,
 	paths.RoutingConfig,

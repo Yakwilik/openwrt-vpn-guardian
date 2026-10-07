@@ -163,8 +163,8 @@ func runStaticChecks(rep *Report, cfg config.Stack) {
 			}
 			add(rep, "Xray DNS listener", err == nil, fmt.Sprintf("127.0.0.1:%d err=%v", cfg.DNS.XrayPort, err))
 		}
-		dnsOK, detail := probeClientDNS(cfg.DNS.ListenPort)
-		add(rep, "client DNS through policy", dnsOK, detail)
+		dnsOK, detail := probeClientDNS(53)
+		add(rep, "client DNS via dnsmasq", dnsOK, detail)
 	}
 
 	testJSONAPI(rep, "status", "http://127.0.0.1:20175/api/status")

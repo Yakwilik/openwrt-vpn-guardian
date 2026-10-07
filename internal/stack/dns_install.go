@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Yakwilik/openwrt-vpn-guardian/internal/config"
+	"github.com/Yakwilik/openwrt-vpn-guardian/internal/dnsfront"
 	"github.com/Yakwilik/openwrt-vpn-guardian/internal/dnsproxy"
 	"github.com/Yakwilik/openwrt-vpn-guardian/internal/lockfile"
 	"github.com/Yakwilik/openwrt-vpn-guardian/internal/paths"
@@ -16,7 +17,8 @@ import (
 
 // InstallDNSRuntime upgrades just the DNS dispatcher, DNS-only Xray and LAN
 // capture rules. It never rewrites/restarts vpn-front, vpn-policy or v2rayA and
-// never changes the management firewall, system DNS or IP policy routes.
+// never changes the management firewall or IP policy routes. Native dnsmasq
+// stays on :53; router bootstrap is independently fed by the netifd WAN file.
 func InstallDNSRuntime() error {
 	if _, err := os.Stat(paths.FrontEnabled); err != nil {
 		return errors.New("DNS-only upgrade requires an initialized active stack")
@@ -29,6 +31,10 @@ func InstallDNSRuntime() error {
 	}
 	defer lockfile.Release(lock)
 	s, r, err := config.Load()
+	if err != nil {
+		return err
+	}
+	frontendBefore, err := dnsfront.Capture()
 	if err != nil {
 		return err
 	}
@@ -76,6 +82,7 @@ func InstallDNSRuntime() error {
 		previous = append(previous, f)
 	}
 	rollback := func(cause error) error {
+		cause = errors.Join(cause, dnsfront.RestoreCheckpoint(frontendBefore))
 		for i, p := range previous {
 			if p.exists {
 				cause = errors.Join(cause, writePrivateAtomic(p.path, p.data))
@@ -99,10 +106,10 @@ func InstallDNSRuntime() error {
 	if err := syncDNSXrayService(s); err != nil {
 		return rollback(err)
 	}
-	if err := dnsproxy.EnsureLocalGuards(); err != nil {
+	if err := startDNSProxy(s); err != nil {
 		return rollback(err)
 	}
-	if err := startDNSProxy(s); err != nil {
+	if err := dnsfront.Configure(s.DNS.ListenPort); err != nil {
 		return rollback(err)
 	}
 	if out, err := run("nft", "-f", paths.FrontNFT); err != nil {

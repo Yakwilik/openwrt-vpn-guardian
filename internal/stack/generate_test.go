@@ -114,9 +114,8 @@ func TestGeneratedClientDNSInterception(t *testing.T) {
 	for _, fragment := range []string{
 		"chain dns_redirect",
 		"type nat hook prerouting priority -170",
-		`iifname "br-test" ip saddr 192.0.2.0/24 udp dport 53 redirect to :20176`,
-		`iifname "br-test" ip saddr 192.0.2.0/24 tcp dport 53 redirect to :20176`,
-		"chain dns_input",
+		`iifname "br-test" ip saddr 192.0.2.0/24 udp dport 53 redirect to :53`,
+		`iifname "br-test" ip saddr 192.0.2.0/24 tcp dport 53 redirect to :53`,
 	} {
 		if !strings.Contains(nft, fragment) {
 			t.Fatalf("generated nft missing %q:\n%s", fragment, nft)
@@ -154,5 +153,18 @@ func TestDNSXrayIsIsolatedFromApplicationPolicy(t *testing.T) {
 		if !strings.Contains(text, part) {
 			t.Fatalf("DNS core missing %s", part)
 		}
+	}
+}
+
+func TestDNSNativeFrontendLoopbackCompatibility(t *testing.T) {
+	cfg := defaultStack("br-lan", "192.168.8.0/24", "eth1", "/usr/share/xray")
+	rules := makeNFT(cfg)
+	for _, fragment := range []string{`oifname "lo" ip daddr 127.0.0.1 tcp dport 20176 meta mark set meta mark | 0x8000`, `oifname "lo" ip saddr 127.0.0.1 tcp sport 53 meta mark set meta mark | 0x8000`, `udp dport 53 redirect to :53`} {
+		if !strings.Contains(rules, fragment) {
+			t.Fatalf("missing %s", fragment)
+		}
+	}
+	if strings.Contains(rules, "redirect to :20176") {
+		t.Fatal("LAN bypasses native dnsmasq")
 	}
 }

@@ -31,11 +31,11 @@ export function TrafficPath({ status }: TrafficPathProps) {
           label="DNS"
           healthy={Boolean(status?.dns_healthy)}
           steps={
-            status?.dns_mode === "system"
-              ? ["LAN", "vpn-guardian-dns", "dnsmasq", "WAN resolver"]
+            status?.dns_mode === "system" || status?.dns_runtime_policy === "direct"
+              ? ["LAN", "dnsmasq", "Guardian", "System DNS"]
               : status?.dns_mode === "xray"
-                ? ["LAN", "DNS dispatcher", "Xray DNS", "VPN backend"]
-                : ["LAN", "DNS dispatcher", "VPN backend", "custom resolver"]
+                ? ["LAN", "dnsmasq", "Guardian", "Xray DNS", "VPN"]
+                : ["LAN", "dnsmasq", "Guardian", "VPN", "Custom DNS"]
           }
         />
       </div>
@@ -47,7 +47,7 @@ export function TrafficPath({ status }: TrafficPathProps) {
         <State label="Front listener" ok={Boolean(status?.tproxy?.front_port)} />
         <State label="Backend SOCKS" ok={Boolean(status?.tproxy?.backend_socks)} />
         <State
-          label={`DNS ${status?.dns_mode || "—"}`}
+          label={`DNS ${status?.dns_mode || "—"} · ${status?.dns_runtime_policy || "—"}`}
           ok={Boolean(status?.dns_healthy)}
         />
       </div>

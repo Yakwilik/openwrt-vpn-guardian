@@ -3,6 +3,7 @@ package collector
 import (
 	"context"
 	"fmt"
+	"github.com/Yakwilik/openwrt-vpn-guardian/internal/policy"
 	"strings"
 	"sync"
 	"time"
@@ -36,7 +37,7 @@ func checkDNS(stack config.Stack) map[string]DNSCheck {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
 			q := new(dns.Msg).SetQuestion(dns.Fqdn(name), dns.TypeA)
-			r, elapsed, err := (&dns.Client{Net: "udp", Timeout: 3 * time.Second}).ExchangeContext(ctx, q, fmt.Sprintf("127.0.0.1:%d", stack.DNS.ListenPort))
+			r, elapsed, err := (&dns.Client{Net: "udp", Timeout: 3 * time.Second}).ExchangeContext(ctx, q, "127.0.0.1:53")
 			result := DNSCheck{Name: name, MS: elapsed.Milliseconds()}
 			if err != nil {
 				result.Error = err.Error()
@@ -71,5 +72,5 @@ func dnsChecksHealthy(checks map[string]DNSCheck) bool {
 	return true
 }
 func dnsConfigKey(s config.Stack) string {
-	return fmt.Sprintf("%s/%t/%d/%s", s.DNS.Mode, s.DNS.ProxyOnly(), s.DNS.ListenPort, strings.Join(s.DNS.Resolvers, ","))
+	return fmt.Sprintf("%s/%t/%d/%s", s.DNS.Mode+"/"+policy.DNSRuntimeAt("/"), s.DNS.ProxyOnly(), s.DNS.ListenPort, strings.Join(s.DNS.Resolvers, ","))
 }

@@ -93,9 +93,12 @@ define Package/vpn-guardian/prerm
 [ -n "$$IPKG_INSTROOT" ] && exit 0
 [ "$$PKG_UPGRADE" = "1" ] && exit 0
 
-/usr/bin/vpn-guardian cleanup >/dev/null 2>&1 || true
+if ! /usr/bin/vpn-guardian cleanup; then
+	echo "Cannot safely remove Guardian: native DNS restoration failed." >&2
+	exit 1
+fi
 
-for svc in vpn-guardian-bootstrap vpn-guardian-api vpn-dashboard-collector vpn-backend-watchdog vpn-guardian-dns vpn-dns-xray vpn-front-routing vpn-front vpn-policy; do
+for svc in vpn-guardian-dns-bootstrap vpn-guardian-bootstrap vpn-guardian-api vpn-dashboard-collector vpn-backend-watchdog vpn-guardian-dns vpn-dns-xray vpn-front-routing vpn-front vpn-policy; do
 	[ -x "/etc/init.d/$$svc" ] || continue
 	"/etc/init.d/$$svc" disable >/dev/null 2>&1 || true
 	"/etc/init.d/$$svc" stop >/dev/null 2>&1 || true
@@ -109,7 +112,7 @@ define Package/vpn-guardian/postrm
 [ -n "$$IPKG_INSTROOT" ] && exit 0
 [ "$$PKG_UPGRADE" = "1" ] && exit 0
 
-for svc in vpn-front-routing vpn-guardian-dns vpn-dns-xray vpn-backend-watchdog vpn-dashboard-collector vpn-front vpn-policy; do
+for svc in vpn-guardian-dns-bootstrap vpn-front-routing vpn-guardian-dns vpn-dns-xray vpn-backend-watchdog vpn-dashboard-collector vpn-front vpn-policy; do
 	rm -f "/etc/init.d/$$svc"
 done
 

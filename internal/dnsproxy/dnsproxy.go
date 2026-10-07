@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"github.com/Yakwilik/openwrt-vpn-guardian/internal/config"
+	"github.com/Yakwilik/openwrt-vpn-guardian/internal/dnsfront"
+	"github.com/Yakwilik/openwrt-vpn-guardian/internal/policy"
 	"github.com/miekg/dns"
 	"golang.org/x/net/netutil"
 	"golang.org/x/net/proxy"
@@ -30,85 +32,67 @@ type Runtime struct {
 	Resolvers        []string
 	SOCKSAddr        string
 	XrayResolver     string
-	SystemResolver   string
+	SystemResolvers  []string
+	SystemSource     func() ([]string, error)
+	Policy           func() string
 	Matcher          *DomainMatcher
-	Local            *DomainMatcher
-	LAN              *net.IPNet
-	LANv6            []*net.IPNet
 }
 
 type Server struct {
-	current     atomic.Pointer[Runtime]
-	localGate   chan struct{}
-	proxyGate   chan struct{}
-	localCount  atomic.Uint64
-	systemCount atomic.Uint64
-	proxyCount  atomic.Uint64
-	errorCount  atomic.Uint64
+	current       atomic.Pointer[Runtime]
+	systemGate    chan struct{}
+	proxyGate     chan struct{}
+	systemCount   atomic.Uint64
+	proxyCount    atomic.Uint64
+	fallbackCount atomic.Uint64
+	errorCount    atomic.Uint64
 }
 
 func newServer(rt *Runtime) *Server {
-	s := &Server{localGate: make(chan struct{}, 96), proxyGate: make(chan struct{}, 96)}
+	s := &Server{systemGate: make(chan struct{}, 96), proxyGate: make(chan struct{}, 96)}
 	s.current.Store(rt)
 	return s
 }
-
 func BuildRuntime(s config.Stack, r config.Routing, root string) (*Runtime, error) {
 	matcher, err := LoadDomainMatcher(r.ProxyDomains, s.AssetsDir)
 	if err != nil {
 		return nil, err
 	}
-	local, err := LocalNames(root)
-	if err != nil {
-		return nil, err
-	}
-	_, lan, err := net.ParseCIDR(s.LANCIDR)
-	if err != nil {
-		return nil, err
-	}
-	rt := &Runtime{Mode: s.DNS.Mode, OnlyProxyDomains: s.DNS.ProxyOnly(), Matcher: matcher, Local: local, LAN: lan, SystemResolver: "127.0.0.1:53", SOCKSAddr: fmt.Sprintf("127.0.0.1:%d", s.Backend.SocksPort), XrayResolver: fmt.Sprintf("127.0.0.1:%d", s.DNS.XrayPort)}
+	own := dnsfront.OwnAddresses()
+	rt := &Runtime{Mode: s.DNS.Mode, OnlyProxyDomains: s.DNS.ProxyOnly(), Matcher: matcher,
+		SOCKSAddr: fmt.Sprintf("127.0.0.1:%d", s.Backend.SocksPort), XrayResolver: fmt.Sprintf("127.0.0.1:%d", s.DNS.XrayPort),
+		Policy: func() string { return policy.DNSRuntimeAt(root) }, SystemSource: func() ([]string, error) { return dnsfront.ReadResolvers(root, own) }}
 	source := s.DNS.Resolvers
 	if s.DNS.Mode == config.DNSModeXray {
 		source = config.DefaultClientDNS().Resolvers
 	}
-	for _, resolver := range source {
-		ep, err := config.DNSResolverEndpoint(resolver)
+	for _, v := range source {
+		ep, err := config.DNSResolverEndpoint(v)
 		if err != nil {
 			return nil, err
 		}
 		rt.Resolvers = append(rt.Resolvers, ep)
 	}
-	if iface, err := net.InterfaceByName(s.LANInterface); err == nil {
-		addresses, _ := iface.Addrs()
-		for _, a := range addresses {
-			_, n, err := net.ParseCIDR(a.String())
-			if err == nil && n.IP.To4() == nil {
-				rt.LANv6 = append(rt.LANv6, n)
-			}
-		}
-	}
 	return rt, nil
 }
-
 func (rt *Runtime) route(name string) string {
-	if isLocalName(rt.Local, name) || localReverse(rt, name) {
-		return "local"
-	}
 	if rt.Mode == config.DNSModeSystem || (rt.OnlyProxyDomains && !rt.Matcher.Match(name)) {
 		return "system"
 	}
 	return "proxy"
+}
+func (rt *Runtime) policy() string {
+	if rt.Policy == nil {
+		return "killswitch"
+	}
+	return rt.Policy()
 }
 
 func (s *Server) ServeDNS(w dns.ResponseWriter, q *dns.Msg) {
 	rt := s.current.Load()
 	host, _, _ := net.SplitHostPort(w.RemoteAddr().String())
 	ip := net.ParseIP(strings.Split(host, "%")[0])
-	allowed := ip.IsLoopback() || (rt.LAN != nil && rt.LAN.Contains(ip))
-	for _, n := range rt.LANv6 {
-		allowed = allowed || n.Contains(ip)
-	}
-	if !allowed {
+	if !ip.IsLoopback() {
 		writeError(w, q, dns.RcodeRefused)
 		return
 	}
@@ -117,14 +101,9 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, q *dns.Msg) {
 		return
 	}
 	route := rt.route(q.Question[0].Name)
-	gate := s.localGate
-	if route == "proxy" {
+	gate := s.systemGate
+	if route == "proxy" && rt.policy() != "direct" {
 		gate = s.proxyGate
-		s.proxyCount.Add(1)
-	} else if route == "local" {
-		s.localCount.Add(1)
-	} else {
-		s.systemCount.Add(1)
 	}
 	select {
 	case gate <- struct{}{}:
@@ -134,9 +113,19 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, q *dns.Msg) {
 		s.errorCount.Add(1)
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 4500*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
 	defer cancel()
-	response, err := rt.exchange(ctx, q, route)
+	response, path, err := rt.resolve(ctx, q, route)
+	switch path {
+	case "proxy":
+		s.proxyCount.Add(1)
+	case "fallback":
+		s.proxyCount.Add(1)
+		s.fallbackCount.Add(1)
+		s.systemCount.Add(1)
+	case "system", "direct":
+		s.systemCount.Add(1)
+	}
 	if err != nil {
 		s.errorCount.Add(1)
 		writeError(w, q, dns.RcodeServerFailure)
@@ -164,33 +153,46 @@ func writeError(w dns.ResponseWriter, q *dns.Msg, code int) {
 	_ = w.WriteMsg(m)
 }
 
-func (rt *Runtime) exchange(ctx context.Context, q *dns.Msg, route string) (*dns.Msg, error) {
-	if route != "proxy" {
-		return exchangeDirect(ctx, q, rt.SystemResolver)
-	}
-	if rt.Mode == config.DNSModeXray && (q.Question[0].Qtype == dns.TypeA || q.Question[0].Qtype == dns.TypeAAAA) {
-		return exchangeDirect(ctx, q, rt.XrayResolver)
-	}
-	// A proxy failure must never fall back to system/WAN DNS. Retry only the
-	// configured VPN resolvers; preserve legitimate NXDOMAIN and empty answers.
-	var errs []error
-	for _, endpoint := range rt.Resolvers {
-		attempt, cancel := context.WithTimeout(ctx, 1800*time.Millisecond)
-		dialer, err := proxy.SOCKS5("tcp", rt.SOCKSAddr, nil, &net.Dialer{Timeout: 1800 * time.Millisecond})
-		var response *dns.Msg
-		if err == nil {
-			var conn net.Conn
-			conn, err = dialer.(proxy.ContextDialer).DialContext(attempt, "tcp", endpoint)
-			if err == nil {
-				response, err = exchangeConn(attempt, q, conn)
+// Terminal negative answers (NXDOMAIN and NOERROR/NODATA) are DNS results,
+// not transport failures. They must not trigger a direct fallback.
+func usable(reply *dns.Msg, err error) bool {
+	return err == nil && reply != nil && reply.Rcode != dns.RcodeServerFailure && reply.Rcode != dns.RcodeRefused
+}
+func zeroTTL(reply *dns.Msg) {
+	for _, section := range [][]dns.RR{reply.Answer, reply.Ns, reply.Extra} {
+		for _, rr := range section {
+			if rr.Header().Rrtype == dns.TypeOPT {
+				continue
+			}
+			rr.Header().Ttl = 0
+			if soa, ok := rr.(*dns.SOA); ok {
+				soa.Minttl = 0
 			}
 		}
+	}
+}
+func (rt *Runtime) system(ctx context.Context, q *dns.Msg) (*dns.Msg, error) {
+	upstreams := rt.SystemResolvers
+	if rt.SystemSource != nil {
+		var err error
+		upstreams, err = rt.SystemSource()
+		if err != nil {
+			return nil, err
+		}
+	}
+	if len(upstreams) == 0 {
+		return nil, errors.New("system DNS has no usable upstream")
+	}
+	var errs []error
+	for _, ep := range upstreams {
+		attempt, cancel := context.WithTimeout(ctx, 900*time.Millisecond)
+		reply, err := exchangeDirect(attempt, q, ep)
 		cancel()
-		if err == nil && response.Rcode != dns.RcodeServerFailure && response.Rcode != dns.RcodeRefused {
-			return response, nil
+		if usable(reply, err) {
+			return reply, nil
 		}
 		if err == nil {
-			err = fmt.Errorf("upstream returned %s", dns.RcodeToString[response.Rcode])
+			err = errors.New("system upstream returned DNS failure")
 		}
 		errs = append(errs, err)
 		if ctx.Err() != nil {
@@ -199,6 +201,95 @@ func (rt *Runtime) exchange(ctx context.Context, q *dns.Msg, route string) (*dns
 	}
 	return nil, errors.Join(errs...)
 }
+func (rt *Runtime) resolve(ctx context.Context, q *dns.Msg, route string) (*dns.Msg, string, error) {
+	if route == "system" {
+		r, e := rt.system(ctx, q)
+		return r, "system", e
+	}
+	mode := rt.policy()
+	if mode == "killswitch-blocked" {
+		return nil, "proxy", errors.New("DNS blocked by runtime policy")
+	}
+	if mode == "direct" {
+		r, e := rt.system(ctx, q)
+		if rt.policy() != "direct" {
+			return nil, "direct", errors.New("DNS policy changed during direct request")
+		}
+		if e == nil {
+			zeroTTL(r)
+		}
+		return r, "direct", e
+	}
+	// Reserve an independent time budget for fail-open. An exhausted VPN attempt
+	// must not leave fallback with an already-expired request deadline.
+	attempt, cancel := context.WithTimeout(ctx, 2700*time.Millisecond)
+	r, err := rt.vpn(attempt, q)
+	cancel()
+	if usable(r, err) {
+		if rt.policy() == "killswitch-blocked" {
+			return nil, "proxy", errors.New("DNS policy became blocked")
+		}
+		return r, "proxy", nil
+	}
+	if err == nil {
+		err = errors.New("VPN resolver returned DNS failure")
+	}
+	// Recheck at the decision point: never use permissions captured before the
+	// operator changed fail-open back to VPN-only.
+	current := rt.policy()
+	if current != "failopen" && current != "direct" {
+		return nil, "proxy", err
+	}
+	r, e := rt.system(ctx, q)
+	current = rt.policy()
+	if current != "failopen" && current != "direct" {
+		return nil, "fallback", errors.New("DNS policy tightened during fallback")
+	}
+	if e != nil {
+		return nil, "fallback", errors.Join(err, e)
+	}
+	// Do not retain a direct answer after automatic VPN recovery.
+	zeroTTL(r)
+	return r, "fallback", nil
+}
+func (rt *Runtime) exchange(ctx context.Context, q *dns.Msg, route string) (*dns.Msg, error) {
+	r, _, e := rt.resolve(ctx, q, route)
+	return r, e
+}
+func (rt *Runtime) vpn(ctx context.Context, q *dns.Msg) (*dns.Msg, error) {
+	if rt.Mode == config.DNSModeXray && (q.Question[0].Qtype == dns.TypeA || q.Question[0].Qtype == dns.TypeAAAA) {
+		return exchangeDirect(ctx, q, rt.XrayResolver)
+	}
+	var errs []error
+	for _, endpoint := range rt.Resolvers {
+		attempt, cancel := context.WithTimeout(ctx, 1200*time.Millisecond)
+		dialer, err := proxy.SOCKS5("tcp", rt.SOCKSAddr, nil, &net.Dialer{Timeout: 1200 * time.Millisecond})
+		var reply *dns.Msg
+		if err == nil {
+			var conn net.Conn
+			conn, err = dialer.(proxy.ContextDialer).DialContext(attempt, "tcp", endpoint)
+			if err == nil {
+				reply, err = exchangeConn(attempt, q, conn)
+			}
+		}
+		cancel()
+		if usable(reply, err) {
+			return reply, nil
+		}
+		if err == nil {
+			err = errors.New("VPN upstream returned DNS failure")
+		}
+		errs = append(errs, err)
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	if len(errs) == 0 {
+		return nil, errors.New("no VPN DNS resolvers configured")
+	}
+	return nil, errors.Join(errs...)
+}
+
 func exchangeDirect(ctx context.Context, q *dns.Msg, endpoint string) (*dns.Msg, error) {
 	c := &dns.Client{Net: "udp", Timeout: 1800 * time.Millisecond}
 	reply, _, err := c.ExchangeContext(ctx, q, endpoint)
@@ -234,15 +325,12 @@ func Run(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := EnsureLocalGuards(); err != nil {
-		return err
-	}
 	rt, err := BuildRuntime(cfg, rules, "/")
 	if err != nil {
 		return err
 	}
 	server := newServer(rt)
-	addr := fmt.Sprintf(":%d", cfg.DNS.ListenPort)
+	addr := fmt.Sprintf("127.0.0.1:%d", cfg.DNS.ListenPort)
 	udp, err := net.ListenPacket("udp", addr)
 	if err != nil {
 		return err
@@ -292,38 +380,14 @@ func Run(args []string) error {
 	})
 	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
 		rt := server.current.Load()
-		_ = json.NewEncoder(w).Encode(map[string]any{"mode": rt.Mode, "onlyProxyDomains": rt.OnlyProxyDomains, "local": server.localCount.Load(), "system": server.systemCount.Load(), "proxy": server.proxyCount.Load(), "errors": server.errorCount.Load()})
+		_ = json.NewEncoder(w).Encode(map[string]any{"architecture": "dnsmasq-first", "mode": rt.Mode, "policy": rt.policy(), "onlyProxyDomains": rt.OnlyProxyDomains, "system": server.systemCount.Load(), "proxy": server.proxyCount.Load(), "fallbacks": server.fallbackCount.Load(), "errors": server.errorCount.Load()})
 	})
 	hs := &http.Server{Handler: mux, ReadHeaderTimeout: time.Second, WriteTimeout: 5 * time.Second}
 	errs := make(chan error, 3)
 	go func() { errs <- us.ActivateAndServe() }()
 	go func() { errs <- ts.ActivateAndServe() }()
 	go func() { errs <- hs.Serve(control) }()
-	// DHCP changes do not require a DNS restart. Replace an immutable local map
-	// while retaining any concurrently reloaded external/routing configuration.
-	go func() {
-		ticker := time.NewTicker(3 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				local, err := LocalNames("/")
-				if err != nil {
-					continue
-				}
-				for {
-					old := server.current.Load()
-					next := *old
-					next.Local = local
-					if server.current.CompareAndSwap(old, &next) {
-						break
-					}
-				}
-			}
-		}
-	}()
+
 	select {
 	case <-ctx.Done():
 		err = nil
