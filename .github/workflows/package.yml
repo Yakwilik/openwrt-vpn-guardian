@@ -11,6 +11,8 @@ on:
       - "configs/**"
       - "package/**"
       - "scripts/package-openwrt.sh"
+      - "scripts/export-dnsmasq-openwrt.sh"
+      - "scripts/verify-release-assets.py"
       - "go.mod"
       - "go.sum"
       - ".github/workflows/package.yml"
@@ -21,6 +23,8 @@ on:
       - "configs/**"
       - "package/**"
       - "scripts/package-openwrt.sh"
+      - "scripts/export-dnsmasq-openwrt.sh"
+      - "scripts/verify-release-assets.py"
       - "go.mod"
       - "go.sum"
       - ".github/workflows/package.yml"
@@ -61,7 +65,7 @@ jobs:
   ipk:
     needs: test
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -103,7 +107,7 @@ jobs:
             printf 'src-git packages https://github.com/openwrt/packages.git^%s\n' "$PACKAGES_FEED_COMMIT"
           } > "$RUNNER_TEMP/openwrt-sdk/feeds.conf"
 
-      - name: Build and verify both packages
+      - name: Build and verify all packages and native DNS variants
         env:
           PACKAGE_ARCH: ${{ matrix.arch }}
           SDK_TARGET: ${{ matrix.target }}
@@ -137,6 +141,7 @@ jobs:
         run: |
           cd dist
           sha256sum --check --strict -- *.sha256
+          python3 "$GITHUB_WORKSPACE/scripts/verify-release-assets.py" . --write-manifest
           release_options=()
           if [[ "${RELEASE_TAG%%+*}" == *-* ]]; then
             release_options+=(--prerelease)

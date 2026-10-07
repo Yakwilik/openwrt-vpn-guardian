@@ -44,7 +44,7 @@ check_dir="$(mktemp -d)"
 trap 'rm -rf -- "$source_mirror" "$check_dir"' EXIT
 git clone --bare --quiet "$source_dir" "$source_mirror/repo.git"
 mkdir "$source_mirror/package-source"
-git --git-dir="$source_mirror/repo.git" archive "$source_commit" package/openwrt package/v2raya \
+git --git-dir="$source_mirror/repo.git" archive "$source_commit" package/openwrt package/v2raya package/dnsmasq-guardian \
   | tar -xf - -C "$source_mirror/package-source"
 
 cd "$sdk_dir"
@@ -73,15 +73,47 @@ import re
 config = Path('.config')
 lines = config.read_text().splitlines() if config.exists() else []
 lines = [line for line in lines if not re.match(r'^(# )?CONFIG_(PACKAGE_\S+|ALL(?:_KMODS|_NONSHARED)?)(?:[ =])', line)]
-lines.extend(['CONFIG_ALL=n', 'CONFIG_ALL_KMODS=n', 'CONFIG_ALL_NONSHARED=n',
-              'CONFIG_PACKAGE_v2raya=m', 'CONFIG_PACKAGE_vpn-guardian=m'])
+lines.extend([
+    'CONFIG_ALL=n', 'CONFIG_ALL_KMODS=n', 'CONFIG_ALL_NONSHARED=n',
+    '# CONFIG_PACKAGE_dnsmasq is not set',
+    'CONFIG_PACKAGE_dnsmasq-full=m',
+    'CONFIG_PACKAGE_dnsmasq_full_dhcp=y',
+    'CONFIG_PACKAGE_dnsmasq_full_dhcpv6=y',
+    'CONFIG_PACKAGE_dnsmasq_full_dnssec=y',
+    'CONFIG_PACKAGE_dnsmasq_full_auth=y',
+    'CONFIG_PACKAGE_dnsmasq_full_ipset=y',
+    'CONFIG_PACKAGE_dnsmasq_full_nftset=y',
+    'CONFIG_PACKAGE_dnsmasq_full_conntrack=y',
+    'CONFIG_PACKAGE_dnsmasq_full_noid=y',
+    'CONFIG_PACKAGE_dnsmasq_full_tftp=y',
+    'CONFIG_PACKAGE_v2raya=m', 'CONFIG_PACKAGE_vpn-guardian=m',
+])
 config.write_text('\n'.join(lines) + '\n')
 PY
+# The native dnsmasq-full package must be compiled from the exact same pinned
+# SDK and security-patched recipe as Guardian. Build OpenWrt and GL.iNet
+# variants separately; never ship a vanilla dnsmasq that silently treats
+# regex: selectors as literal domain names.
+"$source_mirror/package-source/package/dnsmasq-guardian/build-openwrt.sh" "$sdk_dir" --prepare-only
 make defconfig
+grep -Fx 'CONFIG_PACKAGE_dnsmasq-full=m' .config
+for flag in dhcp dhcpv6 dnssec auth ipset nftset conntrack noid tftp; do
+  grep -Fx "CONFIG_PACKAGE_dnsmasq_full_${flag}=y" .config
+done
 mkdir -p "$sdk_dir/bin"
 find "$sdk_dir/bin" -type f \( -name 'vpn-guardian_*.ipk' -o -name 'v2raya_*.ipk' \) -delete
+# Compile native DNS first so all dependency checks use the patched recipe.
+make package/network/services/dnsmasq/clean V=s
+make -j"${JOBS:-2}" package/network/services/dnsmasq/compile V=s
+"$source_dir/scripts/export-dnsmasq-openwrt.sh" "$sdk_dir" "$output_dir" "$expected_arch" openwrt "$source_commit"
 make package/v2raya/compile V=s
 make package/vpn-guardian/compile V=s
+# The GL.iNet build adds the vendor-compatible SO_MARK and init behavior.
+# Clear all old compile stamps before rebuilding the same package revision.
+"$source_mirror/package-source/package/dnsmasq-guardian/build-openwrt.sh" "$sdk_dir" --prepare-only --glinet
+make package/network/services/dnsmasq/clean V=s
+make -j"${JOBS:-2}" package/network/services/dnsmasq/compile V=s
+"$source_dir/scripts/export-dnsmasq-openwrt.sh" "$sdk_dir" "$output_dir" "$expected_arch" glinet "$source_commit"
 
 go_tool="$(find -L "$sdk_dir/staging_dir/hostpkg" -type f -path '*/bin/go' -print -quit)"
 test -n "$go_tool"
@@ -196,4 +228,5 @@ cp "$backend_dir/data/usr/share/licenses/v2raya/SOURCE.txt" "$output_dir/v2raya-
   cd "$output_dir"
   sha256sum "$backend_source" > "$backend_source.sha256"
 )
-printf 'Verified both packages for %s at source %s\n' "$expected_arch" "$source_commit"
+python3 "$source_dir/scripts/verify-release-assets.py" --arch "$expected_arch" "$output_dir"
+printf 'Verified Guardian, v2rayA and both dnsmasq variants for %s at source %s\n' "$expected_arch" "$source_commit"

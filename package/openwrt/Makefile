@@ -40,7 +40,7 @@ define Package/vpn-guardian
   CATEGORY:=Network
   SUBMENU:=VPN
   TITLE:=Selective VPN control plane for v2rayA
-  DEPENDS:=$(ARCH_DEPENDS) +xray-core +v2ray-geosite +ca-bundle +ip-full +kmod-nft-tproxy +nftables-json
+  DEPENDS:=$(ARCH_DEPENDS) +dnsmasq-full +xray-core +v2ray-geosite +ca-bundle +ip-full +kmod-nft-tproxy +nftables-json
   EXTRA_DEPENDS:=v2raya (>=2.5.8)
 endef
 

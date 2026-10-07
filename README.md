@@ -6,15 +6,18 @@
 
 Для **OpenWrt 24.10 с opkg**. Доступны сборки для ARM64, ARMv7 и x86-64; [точные архитектуры и требования](docs/installation.md).
 
-1. Откройте [Releases](https://github.com/Yakwilik/openwrt-vpn-guardian/releases) и скачайте два файла *.ipk* для архитектуры роутера: **vpn-guardian** и **v2raya**.
-2. Скопируйте оба файла в */tmp* на роутере.
-3. Подключитесь к роутеру по SSH и выполните:
+1. Откройте [Releases](https://github.com/Yakwilik/openwrt-vpn-guardian/releases) и выберите сборки для архитектуры вашего OpenWrt 24.10 с *opkg*.
+2. Скачайте **три IPK** одной архитектуры: *vpn-guardian*, *v2raya* и один *dnsmasq-full* — вариант *.openwrt.ipk* для стандартного OpenWrt либо *.glinet.ipk* для совместимой прошивки GL.iNet.
+3. Скопируйте файлы в */tmp* и подключитесь по SSH к IP-адресу роутера. Для стандартного OpenWrt выполните:
 
 ~~~sh
 opkg update
-opkg install /tmp/v2raya_*.ipk /tmp/vpn-guardian_*.ipk
+opkg install /tmp/dnsmasq-full_*.openwrt.ipk /tmp/v2raya_*.ipk /tmp/vpn-guardian_*.ipk
 vpn-guardian init
 ~~~
+
+На GL.iNet с фирменным dnsmasq вместо *.openwrt.ipk* используйте *.glinet.ipk*. **Не устанавливайте оба варианта dnsmasq-full.** Замена dnsmasq может кратковременно прервать DNS/DHCP, поэтому проводите её через локальный SSH по IP; при конфликте со штатным *dnsmasq* см. [инструкцию по замене](docs/installation.md).
+
 
 Зависимости устанавливаются вместе с пакетами. Мастер настройки проверит их доступность, определит сеть и запросит:
 
