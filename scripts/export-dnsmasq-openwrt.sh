@@ -55,7 +55,10 @@ esac
 strings "$binary" | grep -F 'regex-server' > "$work/regex-markers"
 grep -F 'regex-server-ack' "$work/regex-markers"
 if [[ "$flavor" == glinet ]]; then
-  strings "$binary" | grep -F -- '--mark=' > "$work/mark-marker"
+  # getopt assembles "--mark=" at runtime, so it is not a literal ELF
+  # string. Probe the vendor-specific option description and error path.
+  strings "$binary" | grep -F 'Specify the outgoing packet mark.' > "$work/mark-marker"
+  strings "$binary" | grep -F 'bad outgoing packet mark' >> "$work/mark-marker"
   grep -F 'procd_add_jail_mount /tmp/resolv.conf.vpn' "$work/data/etc/init.d/dnsmasq"
 else
   if grep -Fq 'procd_add_jail_mount /tmp/resolv.conf.vpn' "$work/data/etc/init.d/dnsmasq"; then
