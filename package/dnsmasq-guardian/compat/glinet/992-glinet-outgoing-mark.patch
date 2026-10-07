@@ -1,0 +1,124 @@
+From: VPN Guardian maintainers
+Subject: dnsmasq: preserve GL.iNet outgoing socket-mark configuration
+
+Independent compatibility implementation for the observed --mark=<hex>
+interface and mark=0x1000 configuration on GL.iNet firmware. This is not a
+retrieved GL.iNet source patch. Fixed nonzero marks take precedence over
+conntrack; absent/zero marks preserve upstream behavior. All outgoing DNS
+UDP/TCP sockets pass local_bind; mark failures prevent unmarked sends.
+
+--- a/src/dnsmasq.h
++++ b/src/dnsmasq.h
+@@ -1187,6 +1187,7 @@
+   int randport_limit; /* Maximum number of source ports for query. */
+   int cachesize, ftabsize;
+   int port, query_port, min_port, max_port;
++  unsigned int packet_mark; /* explicit outgoing DNS socket mark */
+   unsigned long local_ttl, neg_ttl, max_ttl, min_cache_ttl, max_cache_ttl, auth_ttl, dhcp_ttl, use_dhcp_ttl;
+   char *dns_client_id;
+   u32 umbrella_org;
+--- a/src/option.c
++++ b/src/option.c
+@@ -192,6 +192,7 @@
+ #define LOPT_NO_DHCP4      383
+ #define LOPT_MAX_PROCS     384
+ #define LOPT_DNSSEC_LIMITS 385
++#define LOPT_PACKET_MARK   9001
+ 
+ #ifdef HAVE_GETOPT_LONG
+ static const struct option opts[] =  
+@@ -250,6 +251,7 @@
+     { "addn-hosts", 1, 0, 'H' },
+     { "hostsdir", 1, 0, LOPT_HOST_INOTIFY },
+     { "query-port", 1, 0, 'Q' },
++    { "mark", 1, 0, LOPT_PACKET_MARK },
+     { "except-interface", 1, 0, 'I' },
+     { "no-dhcp-interface", 1, 0, '2' },
+     { "no-dhcpv4-interface", 1, 0, LOPT_NO_DHCP4 },
+@@ -584,6 +586,7 @@
+   { LOPT_RAPID_COMMIT, OPT_RAPID_COMMIT, NULL, gettext_noop("Enables DHCPv4 Rapid Commit option."), NULL },
+   { LOPT_DUMPFILE, ARG_ONE, "<path>", gettext_noop("Path to debug packet dump file."), NULL },
+   { LOPT_DUMPMASK, ARG_ONE, "<hex>", gettext_noop("Mask which packets to dump."), NULL },
++  { LOPT_PACKET_MARK, ARG_ONE, "<hex>", gettext_noop("Specify the outgoing packet mark."), NULL },
+   { LOPT_SCRIPT_TIME, OPT_LEASE_RENEW, NULL, gettext_noop("Call dhcp-script when lease expiry changes."), NULL },
+   { LOPT_UMBRELLA, ARG_ONE, "[=<optspec>]", gettext_noop("Send Cisco Umbrella identifiers including remote IP."), NULL },
+   { LOPT_QUIET_TFTP, OPT_QUIET_TFTP, NULL, gettext_noop("Do not log routine TFTP."), NULL },
+@@ -3435,6 +3438,24 @@
+ 	break;
+       }
+       
++    case LOPT_PACKET_MARK: /* --mark: GL.iNet configuration compatibility */
++      {
++#if defined(HAVE_LINUX_NETWORK) && defined(SO_MARK)
++        char *end;
++        unsigned long value;
++        if (!arg || !isxdigit((unsigned char)arg[0]))
++          ret_err(_("bad outgoing packet mark"));
++        errno = 0;
++        value = strtoul(arg, &end, 16);
++        if (errno || *end || value > 0xffffffffUL)
++          ret_err(_("bad outgoing packet mark"));
++        daemon->packet_mark = (unsigned int)value;
++#else
++        ret_err(_("outgoing packet mark is not supported on this platform"));
++#endif
++        break;
++      }
++
+     case 'Q':  /* --query-port */
+       if (!atoi_check16(arg, &daemon->query_port))
+ 	ret_err(gen_err);
+--- a/src/network.c
++++ b/src/network.c
+@@ -1371,6 +1371,16 @@
+   int tries = 1;
+   unsigned short ports_avail = 1;
+ 
++#if defined(HAVE_LINUX_NETWORK) && defined(SO_MARK)
++  /* All upstream UDP and TCP sockets pass here, before any bind or connect.
++     An explicit mark is required routing policy: never send unmarked after
++     setsockopt fails. Listening, DHCP and reply sockets do not pass here. */
++  if (daemon->packet_mark &&
++      setsockopt(fd, SOL_SOCKET, SO_MARK, &daemon->packet_mark,
++                 sizeof(daemon->packet_mark)) == -1)
++    return 0;
++#endif
++
+   if (addr_copy.sa.sa_family == AF_INET)
+     port = addr_copy.in.sin_port;
+   else
+--- a/src/dnsmasq.c
++++ b/src/dnsmasq.c
+@@ -507,6 +507,11 @@
+   if ((is_dad_listeners() || option_bool(OPT_CLEVERBIND)) &&
+       (option_bool(OPT_TFTP) || (daemon->port != 0 && daemon->port <= 1024)))
+     need_cap_net_bind_service = 1;
++
++  /* Marking sockets opened after dropping uid needs NET_ADMIN on kernels
++     predating SO_MARK's NET_RAW alternative. Keep it only when configured. */
++  if (daemon->packet_mark)
++    need_cap_net_admin = 1;
+ 
+   /* usptream servers which bind to an interface call SO_BINDTODEVICE
+      for each TCP connection, so need CAP_NET_RAW */
+--- a/src/forward.c
++++ b/src/forward.c
+@@ -117,6 +117,9 @@
+ {
+   /* Copy connection mark of incoming query to outgoing connection. */
+   unsigned int mark;
++  /* A fixed instance mark takes precedence over per-client conntrack marks. */
++  if (daemon->packet_mark)
++    return;
+   if (get_incoming_mark(&forward->frec_src.source, &forward->frec_src.dest, 0, &mark))
+     setsockopt(fd, SOL_SOCKET, SO_MARK, &mark, sizeof(unsigned int));
+ }
+@@ -1967,7 +1970,7 @@
+ 	  
+ #ifdef HAVE_CONNTRACK
+ 	  /* Copy connection mark of incoming query to outgoing connection. */
+-	  if (have_mark)
++	  if (have_mark && !daemon->packet_mark)
+ 	    setsockopt(serv->tcpfd, SOL_SOCKET, SO_MARK, &mark, sizeof(unsigned int));
+ #endif			  
+ 	  

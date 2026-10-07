@@ -209,7 +209,9 @@ func TestWireUDPTruncationTCPAndMalformed(t *testing.T) {
 		}
 		w.WriteMsg(r)
 	})
-	server := newServer(&Runtime{Mode: "system", SystemResolvers: []string{upstream}, Matcher: newMatcher()})
+	// Exercise wire handling through an explicitly direct protected-domain
+	// policy. Ordinary/system questions are no longer served by Guardian.
+	server := newServer(&Runtime{Mode: "custom", SystemResolvers: []string{upstream}, Matcher: newMatcher(), Policy: func() string { return "direct" }})
 	addr := testDNS(t, server.ServeDNS)
 	q := new(dns.Msg).SetQuestion("example.com.", dns.TypeTXT)
 	udp := &dns.Client{Net: "udp"}

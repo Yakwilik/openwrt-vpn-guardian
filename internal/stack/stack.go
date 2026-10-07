@@ -371,12 +371,8 @@ func serviceRunning(name string) bool {
 	return err == nil && strings.Contains(out, "running")
 }
 
-func generate(dir string, s Stack, r Routing) error {
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return err
-	}
-
-	front := map[string]any{
+func makeFront(s Stack, r Routing) map[string]any {
+	return map[string]any{
 		"log": map[string]any{"loglevel": "warning", "access": "none"},
 		"inbounds": []any{
 			map[string]any{"tag": "front-socks", "listen": "127.0.0.1", "port": s.Front.SocksPort, "protocol": "socks", "settings": map[string]any{"udp": true}},
@@ -384,7 +380,7 @@ func generate(dir string, s Stack, r Routing) error {
 				"tag": "front-tproxy", "listen": "0.0.0.0", "port": s.Front.TProxyPort, "protocol": "dokodemo-door",
 				"settings":       map[string]any{"network": "tcp,udp", "followRedirect": true},
 				"streamSettings": map[string]any{"sockopt": map[string]any{"tproxy": "tproxy"}},
-				"sniffing":       map[string]any{"enabled": true, "destOverride": []string{"http", "tls", "quic"}, "routeOnly": false},
+				"sniffing":       map[string]any{"enabled": true, "destOverride": []string{"http", "tls", "quic"}, "routeOnly": true},
 			},
 		},
 		"outbounds": []any{
@@ -405,11 +401,17 @@ func generate(dir string, s Stack, r Routing) error {
 		},
 	}
 
+}
+
+func generate(dir string, s Stack, r Routing) error {
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
 	files := []struct {
 		name string
 		data any
 	}{
-		{filepath.Base(paths.FrontConfig), front},
+		{filepath.Base(paths.FrontConfig), makeFront(s, r)},
 		{filepath.Base(paths.DNSXrayConfig), makeDNSXray(s)},
 		{filepath.Base(paths.PolicyFailOpen), makePolicy(s, "failopen")},
 		{filepath.Base(paths.PolicyFailOpenDirect), makePolicy(s, "failopen-direct")},
@@ -563,10 +565,12 @@ func makeNFT(s Stack) string {
 	fmt.Fprintf(&b, "    iifname %q meta nfproto ipv6 udp dport 53 redirect to :53\n", s.LANInterface)
 	fmt.Fprintf(&b, "    iifname %q meta nfproto ipv6 tcp dport 53 redirect to :53\n", s.LANInterface)
 	b.WriteString("  }\n")
-	// GL.iNet may reject unmarked TCP from the dnsmasq UID before its own
-	// loopback accept rule. Permit only DNS on lo by using the vendor's existing
-	// local/WAN class bit; never mark a public destination or alter fw4 itself.
+	// GL.iNet rejects unmarked TCP from dnsmasq before its loopback/WAN rules.
+	// Native direct DNS therefore needs its ordinary TCP/53 upstream traffic
+	// in the vendor's local/WAN class, in addition to loopback DNS transport.
+	// The UID and destination port keep this scoped to native DNS forwarding.
 	b.WriteString("  chain dns_loopback {\n    type filter hook output priority filter - 20; policy accept;\n")
+	b.WriteString("    meta skuid \"dnsmasq\" tcp dport 53 meta mark set meta mark | 0x8000\n")
 	fmt.Fprintf(&b, "    oifname \"lo\" ip daddr 127.0.0.1 tcp dport %d meta mark set meta mark | 0x8000\n", s.DNS.ListenPort)
 	b.WriteString("    oifname \"lo\" ip saddr 127.0.0.1 tcp sport 53 meta mark set meta mark | 0x8000\n  }\n")
 	b.WriteString("  chain prerouting {\n")
@@ -714,6 +718,13 @@ func validateCmd() error {
 	if err != nil {
 		return err
 	}
+	selectors, err := dnsSelectors(s, r)
+	if err != nil {
+		return err
+	}
+	if err := dnsfront.ValidateSelectors(s.DNS.ListenPort, selectors); err != nil {
+		return err
+	}
 	dir, err := os.MkdirTemp("/tmp", "vpn-guardian-validate-")
 	if err != nil {
 		return err
@@ -732,6 +743,13 @@ func validateCmd() error {
 func applyCmd() error {
 	s, r, err := loadConfig()
 	if err != nil {
+		return err
+	}
+	selectors, err := dnsSelectors(s, r)
+	if err != nil {
+		return err
+	}
+	if err := dnsfront.ValidateSelectors(s.DNS.ListenPort, selectors); err != nil {
 		return err
 	}
 	dir, err := os.MkdirTemp("/tmp", "vpn-guardian-apply-")
@@ -828,6 +846,22 @@ func ApplyRouting(r config.Routing) error {
 	if err != nil {
 		return err
 	}
+	var oldRules config.Routing
+	if err := json.Unmarshal(oldRouting, &oldRules); err != nil {
+		return err
+	}
+	oldSelectors, err := dnsSelectors(s, oldRules)
+	if err != nil {
+		return err
+	}
+	selectors, err := dnsSelectors(s, r)
+	if err != nil {
+		return err
+	}
+	transition, err := transitionDNSSelectors(s, oldRules, s, r)
+	if err != nil {
+		return err
+	}
 	oldFront, err := os.ReadFile(paths.FrontConfig)
 	if err != nil {
 		return err
@@ -848,15 +882,25 @@ func ApplyRouting(r config.Routing) error {
 		active = true
 	}
 	rollback := func(cause error) error {
-		cause = errors.Join(cause, writePrivateAtomic(paths.RoutingConfig, oldRouting), writePrivateAtomic(paths.FrontConfig, oldFront))
-		if active {
+		restoreErr := errors.Join(writePrivateAtomic(paths.RoutingConfig, oldRouting), writePrivateAtomic(paths.FrontConfig, oldFront))
+		if active && restoreErr == nil {
 			_, e := run(paths.FrontServiceInit, "restart")
-			cause = errors.Join(cause, e, dnsproxy.Reload(context.Background()))
+			restoreErr = errors.Join(e, dnsproxy.Reload(context.Background()))
+			if restoreErr == nil {
+				restoreErr = dnsfront.UpdateSelectors(s.DNS.ListenPort, oldSelectors)
+			}
 		}
-		return cause
+		// Keep the union protected if either consumer could still be running
+		// the new rules. Narrowing DNS after an incomplete rollback can leak.
+		return errors.Join(cause, restoreErr)
+	}
+	if active {
+		if err := dnsfront.UpdateSelectors(s.DNS.ListenPort, transition); err != nil {
+			return err
+		}
 	}
 	if err := config.SaveRouting(r); err != nil {
-		return err
+		return rollback(err)
 	}
 	if err := copyAtomic(filepath.Join(dir, filepath.Base(paths.FrontConfig)), paths.FrontConfig, 0600); err != nil {
 		return rollback(err)
@@ -870,7 +914,10 @@ func ApplyRouting(r config.Routing) error {
 	if err := dnsproxy.Reload(context.Background()); err != nil {
 		return rollback(err)
 	}
-	return dnsfront.ClearCache()
+	if err := dnsfront.UpdateSelectors(s.DNS.ListenPort, selectors); err != nil {
+		return rollback(err)
+	}
+	return nil
 }
 
 // ApplyDNS updates only LAN client DNS policy. Router-originated DNS remains
@@ -906,18 +953,43 @@ func ApplyDNS(mode string, resolvers []string, onlyProxy *bool) error {
 	if _, err := dnsproxy.BuildRuntime(s, r, "/"); err != nil {
 		return err
 	}
+	oldSelectors, err := dnsSelectors(oldStack, r)
+	if err != nil {
+		return err
+	}
+	selectors, err := dnsSelectors(s, r)
+	if err != nil {
+		return err
+	}
+	transition, err := transitionDNSSelectors(oldStack, r, s, r)
+	if err != nil {
+		return err
+	}
 
 	rollback := func(cause error) error {
 		restoreErr := writePrivateAtomic(paths.StackConfig, oldBytes)
+		if restoreErr != nil {
+			return errors.Join(cause, restoreErr)
+		}
 		reloadCtx, reloadCancel := context.WithTimeout(context.Background(), 6*time.Second)
 		defer reloadCancel()
+		if oldStack.DNS.Mode == config.DNSModeXray {
+			restoreErr = syncDNSXrayService(oldStack)
+		}
 		reloadErr := dnsproxy.Reload(reloadCtx)
 		lifecycleErr := syncDNSXrayService(oldStack)
-		return errors.Join(cause, restoreErr, reloadErr, lifecycleErr)
+		restoreErr = errors.Join(restoreErr, reloadErr, lifecycleErr)
+		if restoreErr == nil {
+			restoreErr = dnsfront.UpdateSelectors(oldStack.DNS.ListenPort, oldSelectors)
+		}
+		return errors.Join(cause, restoreErr)
 	}
 
-	if err := config.SaveStack(s); err != nil {
+	if err := dnsfront.UpdateSelectors(s.DNS.ListenPort, transition); err != nil {
 		return err
+	}
+	if err := config.SaveStack(s); err != nil {
+		return rollback(err)
 	}
 	if s.DNS.Mode == config.DNSModeXray {
 		if err := syncDNSXrayService(s); err != nil {
@@ -935,8 +1007,8 @@ func ApplyDNS(mode string, resolvers []string, onlyProxy *bool) error {
 			return rollback(fmt.Errorf("apply DNS Xray lifecycle: %w", err))
 		}
 	}
-	if err := dnsfront.ClearCache(); err != nil {
-		return rollback(fmt.Errorf("clear native DNS cache: %w", err))
+	if err := dnsfront.UpdateSelectors(s.DNS.ListenPort, selectors); err != nil {
+		return rollback(fmt.Errorf("apply native DNS selectors: %w", err))
 	}
 	return nil
 }
@@ -1085,11 +1157,20 @@ func syncDNSXrayService(s Stack) error {
 }
 
 func restartStack() error {
-	s, _, err := loadConfig()
+	s, r, err := loadConfig()
+	if err != nil {
+		return err
+	}
+	selectors, err := dnsSelectors(s, r)
 	if err != nil {
 		return err
 	}
 	if _, err := dnsfront.Prepare(); err != nil {
+		return err
+	}
+	// Select protected DNS before activating a new application routing table.
+	// Newly protected names fail closed until the Guardian matcher is ready.
+	if err := dnsfront.Configure(s.DNS.ListenPort, selectors); err != nil {
 		return err
 	}
 	mode := strings.TrimSpace(readFile(paths.PolicyMode))
@@ -1103,18 +1184,13 @@ func restartStack() error {
 	if out, err := run(paths.FrontServiceInit, "restart"); err != nil {
 		return fmt.Errorf("restart vpn-front: %v: %s", err, out)
 	}
-	// Start DNS before installing client interception. This applies to all
-	// external modes because local OpenWrt/DHCP names are always dispatched by
-	// the DNS proxy to dnsmasq.
+	// Direct/local DNS stays in dnsmasq while Guardian is being restarted.
 	if s.DNS.Mode == config.DNSModeXray {
 		if err := ensureXrayDNS(s); err != nil {
 			return err
 		}
 	}
 	if err := startDNSProxy(s); err != nil {
-		return err
-	}
-	if err := dnsfront.Configure(s.DNS.ListenPort); err != nil {
 		return err
 	}
 	if out, err := run(paths.FrontRoutingInit, "restart"); err != nil {
@@ -1182,7 +1258,7 @@ func readFile(path string) string {
 }
 
 var backupFiles = []string{
-	dnsfront.StatePath, dnsfront.LocalConfigPath, dnsfront.BootstrapInit, dnsfront.BootstrapStatic, dnsfront.BootstrapHotplug,
+	dnsfront.StatePath, dnsfront.LocalConfigPath, dnsfront.SelectorsPath, dnsfront.BootstrapInit, dnsfront.BootstrapStatic, dnsfront.BootstrapHotplug,
 	paths.DNSXrayConfig, paths.DNSXrayServiceInit,
 	paths.StackConfig,
 	paths.RoutingConfig,

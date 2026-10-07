@@ -132,7 +132,7 @@ func TestSystemDNSStillInterceptsClientsForLocalDispatch(t *testing.T) {
 	cfg.DNS.Mode = "system"
 	nft := makeNFT(cfg)
 	if !strings.Contains(nft, "chain dns_redirect") || !strings.Contains(nft, "dport 53 redirect") {
-		t.Fatalf("system DNS mode must still pass LAN DNS through Guardian dispatcher:\n%s", nft)
+		t.Fatalf("system DNS mode must still pass LAN DNS through native dnsmasq:\n%s", nft)
 	}
 }
 
@@ -167,6 +167,26 @@ func TestDNSNativeFrontendLoopbackCompatibility(t *testing.T) {
 	if strings.Contains(rules, "redirect to :20176") {
 		t.Fatal("LAN bypasses native dnsmasq")
 	}
+	if !strings.Contains(rules, `meta skuid "dnsmasq" tcp dport 53 meta mark set meta mark | 0x8000`) {
+		t.Fatal("native direct DNS TCP upstream is blocked by the vendor firewall")
+	}
+}
+
+func TestTransparentFrontPreservesClientDNSDestination(t *testing.T) {
+	s := defaultStack("br-lan", "192.168.8.0/24", "eth1", "/usr/share/xray")
+	front := makeFront(s, defaultRouting())
+	for _, inbound := range front["inbounds"].([]any) {
+		in := inbound.(map[string]any)
+		if in["tag"] != "front-tproxy" {
+			continue
+		}
+		sniffing := in["sniffing"].(map[string]any)
+		if sniffing["enabled"] != true || sniffing["routeOnly"] != true {
+			t.Fatalf("sniffing must classify routing without replacing the client's destination: %+v", sniffing)
+		}
+		return
+	}
+	t.Fatal("transparent inbound missing")
 }
 
 func TestFailOpenObservatoryConvergesQuickly(t *testing.T) {

@@ -1,6 +1,7 @@
 package stack
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -16,12 +17,10 @@ import (
 	"github.com/Yakwilik/openwrt-vpn-guardian/internal/policy"
 )
 
-// InstallDNSRuntime upgrades the dnsmasq-first integration, DNS dispatcher,
-// DNS-only Xray and the policy variants needed by that architecture. It never
-// rewrites/restarts vpn-front or v2rayA and never changes the management
-// firewall or IP policy routes. vpn-policy is restarted only when its generated
-// policy schema actually changed. Native dnsmasq stays on :53; router bootstrap
-// is independently fed by the preserved system/WAN DNS sources.
+// InstallDNSRuntime upgrades native split DNS and its supporting runtimes.
+// vpn-front is refreshed only when its generated configuration changed, so
+// sniffing preserves the client's DNS result. v2rayA and IP policy routes are
+// untouched. Native dnsmasq stays on :53 and owns ordinary DNS independently.
 func InstallDNSRuntime() error {
 	if _, err := os.Stat(paths.FrontEnabled); err != nil {
 		return errors.New("DNS-only upgrade requires an initialized active stack")
@@ -44,6 +43,13 @@ func InstallDNSRuntime() error {
 	if _, err := dnsproxy.BuildRuntime(s, r, "/"); err != nil {
 		return err
 	}
+	selectors, err := dnsSelectors(s, r)
+	if err != nil {
+		return err
+	}
+	if err := dnsfront.ValidateSelectors(s.DNS.ListenPort, selectors); err != nil {
+		return err
+	}
 	dir, err := os.MkdirTemp("", "guardian-dns-install-")
 	if err != nil {
 		return err
@@ -53,6 +59,25 @@ func InstallDNSRuntime() error {
 	if err := jsonWrite(xr, makeDNSXray(s)); err != nil {
 		return err
 	}
+	wantXray, err := os.ReadFile(xr)
+	if err != nil {
+		return err
+	}
+	haveXray, haveXrayErr := os.ReadFile(paths.DNSXrayConfig)
+	xrayChanged := haveXrayErr != nil || !bytes.Equal(wantXray, haveXray)
+	front := filepath.Join(dir, "front.json")
+	if err := jsonWrite(front, makeFront(s, r)); err != nil {
+		return err
+	}
+	wantFront, err := os.ReadFile(front)
+	if err != nil {
+		return err
+	}
+	haveFront, err := os.ReadFile(paths.FrontConfig)
+	if err != nil {
+		return err
+	}
+	frontChanged := !bytes.Equal(wantFront, haveFront)
 	policyConfigs := []struct {
 		path string
 		mode string
@@ -69,7 +94,7 @@ func InstallDNSRuntime() error {
 			return err
 		}
 	}
-	for _, target := range append([]string{xr}, func() []string {
+	for _, target := range append([]string{xr, front}, func() []string {
 		result := make([]string, 0, len(policyConfigs))
 		for _, item := range policyConfigs {
 			result = append(result, filepath.Join(dir, filepath.Base(item.path)))
@@ -97,6 +122,7 @@ func InstallDNSRuntime() error {
 		src, dst string
 		mode     os.FileMode
 	}{
+		{front, paths.FrontConfig, 0600},
 		{xr, paths.DNSXrayConfig, 0600},
 		{filepath.Join(dir, "dns.init"), paths.DNSServiceInit, 0755},
 		{filepath.Join(dir, "dns-xray.init"), paths.DNSXrayServiceInit, 0755},
@@ -136,12 +162,22 @@ func InstallDNSRuntime() error {
 				_ = os.Remove(p.path)
 			}
 		}
-		if previous[len(previous)-1].exists {
-			_, e := run("nft", "-f", paths.FrontNFT)
+		for _, p := range previous {
+			if p.path == paths.FrontNFT && p.exists {
+				_, e := run("nft", "-f", paths.FrontNFT)
+				cause = errors.Join(cause, e)
+			}
+		}
+		if frontChanged {
+			_, e := run(paths.FrontServiceInit, "restart")
 			cause = errors.Join(cause, e)
 		}
 		if policyChanged {
 			cause = errors.Join(cause, policy.Apply(runtimeMode))
+		}
+		if xrayChanged && s.DNS.Mode == config.DNSModeXray {
+			_, e := run(paths.DNSXrayServiceInit, "restart")
+			cause = errors.Join(cause, e)
 		}
 		_, e := run(paths.DNSServiceInit, "restart")
 		return errors.Join(cause, e)
@@ -156,23 +192,43 @@ func InstallDNSRuntime() error {
 			return rollback(fmt.Errorf("activate migrated policy runtime %s: %w", runtimeMode, err))
 		}
 	}
+	if xrayChanged && s.DNS.Mode == config.DNSModeXray && serviceRunning("vpn-dns-xray") {
+		if out, err := run(paths.DNSXrayServiceInit, "restart"); err != nil {
+			return rollback(fmt.Errorf("refresh DNS Xray configuration: %w: %s", err, out))
+		}
+	}
 	if err := syncDNSXrayService(s); err != nil {
+		return rollback(err)
+	}
+	// Native TCP upstreams must be permitted before client DNS changes owner.
+	if out, err := run("nft", "-f", paths.FrontNFT); err != nil {
+		return rollback(fmt.Errorf("install DNS interception: %w: %s", err, out))
+	}
+	if err := dnsfront.Configure(s.DNS.ListenPort, selectors); err != nil {
 		return rollback(err)
 	}
 	if err := startDNSProxy(s); err != nil {
 		return rollback(err)
 	}
-	if err := dnsfront.Configure(s.DNS.ListenPort); err != nil {
-		return rollback(err)
-	}
-	if out, err := run("nft", "-f", paths.FrontNFT); err != nil {
-		return rollback(fmt.Errorf("install DNS interception: %w: %s", err, out))
-	}
 	if err := dnsproxy.Reload(context.Background()); err != nil {
 		return rollback(err)
 	}
+	if frontChanged {
+		if out, err := run(paths.FrontServiceInit, "restart"); err != nil {
+			return rollback(fmt.Errorf("activate front DNS preservation: %w: %s", err, out))
+		}
+	}
 	if out, err := run(paths.DNSServiceInit, "enable"); err != nil {
 		return rollback(fmt.Errorf("enable DNS service: %w: %s", err, out))
+	}
+	// Long-lived control and status processes otherwise keep the old matcher
+	// update and frontend-check implementations after a binary upgrade.
+	for _, init := range []string{paths.APIServiceInit, paths.CollectorServiceInit} {
+		if serviceRunning(filepath.Base(init)) {
+			if out, err := run(init, "restart"); err != nil {
+				return rollback(fmt.Errorf("refresh %s: %w: %s", filepath.Base(init), err, out))
+			}
+		}
 	}
 	return nil
 }

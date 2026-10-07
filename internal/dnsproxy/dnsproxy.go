@@ -101,6 +101,13 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, q *dns.Msg) {
 		return
 	}
 	route := rt.route(q.Question[0].Name)
+	// Native dnsmasq owns system/non-proxy questions. Never turn this protected
+	// loopback listener back into a general-purpose direct DNS dispatcher when
+	// stale or incorrectly generated selectors send a question here.
+	if route == "system" {
+		writeError(w, q, dns.RcodeRefused)
+		return
+	}
 	gate := s.systemGate
 	if route == "proxy" && rt.policy() != "direct" {
 		gate = s.proxyGate
@@ -393,7 +400,7 @@ func Run(args []string) error {
 	})
 	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
 		rt := server.current.Load()
-		_ = json.NewEncoder(w).Encode(map[string]any{"architecture": "dnsmasq-first", "mode": rt.Mode, "policy": rt.policy(), "onlyProxyDomains": rt.OnlyProxyDomains, "system": server.systemCount.Load(), "proxy": server.proxyCount.Load(), "fallbacks": server.fallbackCount.Load(), "errors": server.errorCount.Load()})
+		_ = json.NewEncoder(w).Encode(map[string]any{"architecture": "native-split-dns", "mode": rt.Mode, "policy": rt.policy(), "onlyProxyDomains": rt.OnlyProxyDomains, "system": server.systemCount.Load(), "proxy": server.proxyCount.Load(), "fallbacks": server.fallbackCount.Load(), "errors": server.errorCount.Load()})
 	})
 	hs := &http.Server{Handler: mux, ReadHeaderTimeout: time.Second, WriteTimeout: 5 * time.Second}
 	errs := make(chan error, 3)

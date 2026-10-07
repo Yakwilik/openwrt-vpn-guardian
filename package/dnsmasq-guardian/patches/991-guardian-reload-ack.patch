@@ -1,0 +1,149 @@
+From: VPN Guardian maintainers
+Subject: dnsmasq: acknowledge selector commit and cache invalidation over UBus
+
+Apply after 990-guardian-regex-servers.patch. An OK response means this
+process accepted the complete file and retired stale DNS consumers.
+
+--- a/src/config.h
++++ b/src/config.h
+@@ -460,6 +460,10 @@
+ #ifndef HAVE_DUMPFILE
+ "no-"
+ #endif
+-"dumpfile regex-server";
++"dumpfile regex-server"
++#ifdef HAVE_UBUS
++" regex-server-ack"
++#endif
++;
+ 
+ #endif /* defined(HAVE_DHCP) */
+--- a/src/dnsmasq.h
++++ b/src/dnsmasq.h
+@@ -1514,7 +1514,7 @@
+ char *option_string(int prot, unsigned int opt, unsigned char *val, 
+ 		    int opt_len, char *buf, int buf_len);
+ void reread_dhcp(void);
+-void read_servers_file(void);
++int read_servers_file(void);
+ void set_option_bool(unsigned int opt);
+ void reset_option_bool(unsigned int opt);
+ struct hostsfile *expand_filelist(struct hostsfile *list);
+--- a/src/option.c
++++ b/src/option.c
+@@ -5750,7 +5750,7 @@
+   return list;
+ }
+ 
+-void read_servers_file(void)
++int read_servers_file(void)
+ {
+   FILE *f;
+   struct server *old_servers, *old_tail, *old_local;
+@@ -5761,7 +5761,7 @@
+   if (!(f = fopen(daemon->servers_file, "r")))
+     {
+        my_syslog(LOG_ERR, _("cannot read %s: %s"), daemon->servers_file, strerror(errno));
+-       return;
++       return 0;
+     }
+ 
+   /* Parse a candidate without mutating active records. A failed allocation or
+@@ -5813,7 +5813,7 @@
+       daemon->servers_tail = old_tail;
+       daemon->local_domains = old_local;
+       my_syslog(LOG_ERR, _("servers-file reload rejected; keeping active servers"));
+-      return;
++      return 0;
+     }
+ 
+   new_servers = daemon->servers;
+@@ -5847,6 +5847,7 @@
+       daemon->serverarrayhwm = array_size;
+     }
+   check_servers(0);
++  return 1;
+ }
+ 
+  
+--- a/src/ubus.c
++++ b/src/ubus.c
+@@ -26,6 +26,9 @@
+ static int ubus_handle_metrics(struct ubus_context *ctx, struct ubus_object *obj,
+ 			       struct ubus_request_data *req, const char *method,
+ 			       struct blob_attr *msg);
++static int ubus_handle_reload_servers(struct ubus_context *ctx, struct ubus_object *obj,
++                                      struct ubus_request_data *req, const char *method,
++                                      struct blob_attr *msg);
+ 
+ #ifdef HAVE_CONNTRACK
+ enum {
+@@ -56,6 +59,7 @@
+ 
+ static const struct ubus_method ubus_object_methods[] = {
+   UBUS_METHOD_NOARG("metrics", ubus_handle_metrics),
++  UBUS_METHOD_NOARG("reload_servers", ubus_handle_reload_servers),
+ #ifdef HAVE_CONNTRACK
+   UBUS_METHOD("set_connmark_allowlist", ubus_handle_set_connmark_allowlist, set_connmark_allowlist_policy),
+ #endif
+@@ -197,6 +201,60 @@
+     CHECK(blobmsg_add_u32(&b, get_metric_name(i), daemon->metrics[i]));
+   
+   CHECK(ubus_send_reply(ctx, req, b.head));
++  return UBUS_STATUS_OK;
++}
++
++/* Synchronous acknowledgement of the file actually accepted by this process.
++   A successful return also retires forked TCP snapshots and late cache inserts. */
++static int ubus_handle_reload_servers(struct ubus_context *ctx, struct ubus_object *obj,
++                                      struct ubus_request_data *req, const char *method,
++                                      struct blob_attr *msg)
++{
++  struct frec *forward;
++  int i;
++
++  (void)ctx;
++  (void)obj;
++  (void)req;
++  (void)method;
++  (void)msg;
++
++  if (!daemon->port || !daemon->servers_file)
++    return UBUS_STATUS_NOT_SUPPORTED;
++  if (!read_servers_file())
++    return UBUS_STATUS_UNKNOWN_ERROR;
++
++  /* TCP children keep a forked server array. SIGALRM is dnsmasq's existing
++     child-exit signal; wait before acknowledging and discard old cache pipes. */
++  for (i = 0; i < daemon->max_procs; i++)
++    {
++      int occupied = daemon->tcp_pids[i] != 0 || daemon->tcp_pipes[i] != -1;
++      if (daemon->tcp_pids[i] != 0)
++        {
++          pid_t child = daemon->tcp_pids[i], waited;
++          if (kill(child, SIGALRM) != 0 && errno != ESRCH)
++            return UBUS_STATUS_UNKNOWN_ERROR;
++          do {
++            waited = waitpid(child, NULL, 0);
++          } while (waited == -1 && errno == EINTR);
++          if (waited == -1 && errno != ECHILD)
++            return UBUS_STATUS_UNKNOWN_ERROR;
++          daemon->tcp_pids[i] = 0;
++        }
++      if (daemon->tcp_pipes[i] != -1)
++        {
++          close(daemon->tcp_pipes[i]);
++          daemon->tcp_pipes[i] = -1;
++        }
++      if (occupied && daemon->metrics[METRIC_TCP_CONNECTIONS] != 0)
++        daemon->metrics[METRIC_TCP_CONNECTIONS]--;
++    }
++
++  /* A reply to an old direct query must not refill the newly cleared cache. */
++  for (forward = daemon->frec_list; forward; forward = forward->next)
++    if (forward->sentto)
++      server_gone(forward->sentto);
++  cache_reload();
+   return UBUS_STATUS_OK;
+ }
+ 

@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/miekg/dns"
 	"google.golang.org/protobuf/encoding/protowire"
 )
 
@@ -18,6 +19,15 @@ type DomainMatcher struct {
 	suffix map[string]struct{}
 	plain  []string
 	regex  []*regexp.Regexp
+	rules  []matcherRule
+}
+
+// matcherRule retains provenance for selector compilation. Match deliberately
+// continues to use the original maps and regular expressions above.
+type matcherRule struct {
+	kind    uint64
+	value   string
+	sources []string
 }
 
 func newMatcher() *DomainMatcher {
@@ -32,15 +42,14 @@ func (m *DomainMatcher) Match(name string) bool {
 	if _, ok := m.full[name]; ok {
 		return true
 	}
-	for suffix := name; suffix != ""; {
-		if _, ok := m.suffix[suffix]; ok {
-			return true
+	// Question names use escaped DNS presentation. A dot inside a label
+	// (for example x\.example.com.) is not a Domain-rule boundary.
+	if name != "" {
+		for _, start := range dns.Split(name) {
+			if _, ok := m.suffix[name[start:]]; ok {
+				return true
+			}
 		}
-		i := strings.IndexByte(suffix, '.')
-		if i < 0 {
-			break
-		}
-		suffix = suffix[i+1:]
 	}
 	for _, p := range m.plain {
 		if strings.Contains(name, p) {
@@ -54,7 +63,7 @@ func (m *DomainMatcher) Match(name string) bool {
 	}
 	return false
 }
-func (m *DomainMatcher) add(kind uint64, value string) error {
+func (m *DomainMatcher) add(kind uint64, value string, sources ...string) error {
 	if value == "" {
 		return fmt.Errorf("empty domain rule")
 	}
@@ -74,6 +83,7 @@ func (m *DomainMatcher) add(kind uint64, value string) error {
 	default:
 		return fmt.Errorf("unknown geosite domain type %d", kind)
 	}
+	m.rules = append(m.rules, matcherRule{kind: kind, value: value, sources: append([]string(nil), sources...)})
 	return nil
 }
 
@@ -146,7 +156,11 @@ func parseGeoDomain(b []byte) (geoDomain, error) {
 
 func LoadDomainMatcher(rules []string, assetsDir string) (*DomainMatcher, error) {
 	m := newMatcher()
-	groups := map[string][][]string{}
+	type geoFilter struct {
+		attrs  []string
+		source string
+	}
+	groups := map[string][]geoFilter{}
 	for _, rule := range rules {
 		typ, value, ok := strings.Cut(rule, ":")
 		if !ok {
@@ -162,12 +176,12 @@ func LoadDomainMatcher(rules []string, assetsDir string) (*DomainMatcher, error)
 			kind = 1
 		case "geosite":
 			parts := strings.Split(strings.ToLower(value), "@")
-			groups[parts[0]] = append(groups[parts[0]], parts[1:])
+			groups[parts[0]] = append(groups[parts[0]], geoFilter{attrs: parts[1:], source: rule})
 			continue
 		default:
 			return nil, fmt.Errorf("unsupported DNS routing rule %q", typ)
 		}
-		if err := m.add(kind, value); err != nil {
+		if err := m.add(kind, value, rule); err != nil {
 			return nil, fmt.Errorf("%s: %w", rule, err)
 		}
 	}
@@ -214,10 +228,10 @@ func LoadDomainMatcher(rules []string, assetsDir string) (*DomainMatcher, error)
 			if err != nil {
 				return err
 			}
-			include := false
-			for _, attrs := range filters {
+			var sources []string
+			for _, filter := range filters {
 				matches := true
-				for _, attr := range attrs {
+				for _, attr := range filter.attrs {
 					invert := strings.HasPrefix(attr, "!")
 					key := strings.TrimPrefix(attr, "!")
 					if key == "" || d.attrs[key] == invert {
@@ -226,12 +240,11 @@ func LoadDomainMatcher(rules []string, assetsDir string) (*DomainMatcher, error)
 					}
 				}
 				if matches {
-					include = true
-					break
+					sources = append(sources, filter.source)
 				}
 			}
-			if include {
-				if err := m.add(d.kind, d.value); err != nil {
+			if len(sources) > 0 {
+				if err := m.add(d.kind, d.value, sources...); err != nil {
 					return err
 				}
 			}

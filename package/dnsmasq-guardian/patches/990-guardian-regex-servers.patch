@@ -1,0 +1,596 @@
+From: VPN Guardian maintainers
+Subject: dnsmasq: native regex upstream selectors with ordinary DNS bypass
+
+Keeps native suffix matching and all DHCP functions. Regex selectors are
+compiled per candidate config and freed during replacement/removal. Failed
+reloads retain the active policy; match errors refuse rather than leak DNS.
+Match canonical escaped query names; native explicit/local rules keep priority.
+
+--- a/src/config.h
++++ b/src/config.h
+@@ -460,6 +460,6 @@
+ #ifndef HAVE_DUMPFILE
+ "no-"
+ #endif
+-"dumpfile";
++"dumpfile regex-server";
+ 
+ #endif /* defined(HAVE_DHCP) */
+--- a/src/dnsmasq.h
++++ b/src/dnsmasq.h
+@@ -49,7 +49,9 @@
+ #endif
+ 
+ /* get these before config.h  for IPv6 stuff... */
+-#include <sys/types.h> 
++#include <sys/types.h>
++#include <regex.h>
++#include <locale.h> 
+ #include <sys/socket.h>
+ 
+ #ifdef __APPLE__
+@@ -593,6 +595,7 @@
+   struct server *next;
+   int serial, arrayposn;
+   int last_server;
++  regex_t *regex; /* Compiled regex: selector; never used by local records. */
+   union mysockaddr addr, source_addr;
+   char interface[IF_NAMESIZE+1];
+   unsigned int ifindex; /* corresponding to interface, above */
+@@ -1177,7 +1180,7 @@
+   struct server *servers, *servers_tail, *local_domains, **serverarray;
+   struct rebind_domain *no_rebind;
+   int server_has_wildcard;
+-  int serverarraysz, serverarrayhwm;
++  int serverarraysz, serverarrayhwm, serverarray_native;
+   struct ipsets *ipsets, *nftsets;
+   u32 allowlist_mask;
+   struct allowlist *allowlists;
+--- a/src/domain-match.c
++++ b/src/domain-match.c
+@@ -23,6 +23,138 @@
+ /* If the server is USE_RESOLV or LITERAL_ADDRES, it lives on the local_domains chain. */
+ #define SERV_IS_LOCAL (SERV_USE_RESOLV | SERV_LITERAL_ADDRESS)
+ 
++
++#define REGEX_SERVER_PREFIX "regex:"
++#define REGEX_SERVER_PREFIX_LEN (sizeof(REGEX_SERVER_PREFIX) - 1)
++#define REGEX_SERVER_MAX_LENGTH 4096
++
++/* Local records share only the prefix of struct server. Never inspect regex
++   on one of those shorter allocations. */
++static int server_is_regex(struct server *serv)
++{
++  return !(serv->flags & SERV_IS_LOCAL) && serv->regex != NULL;
++}
++
++static void free_server_regex(struct server *serv)
++{
++  if (server_is_regex(serv))
++    {
++      regfree(serv->regex);
++      free(serv->regex);
++      serv->regex = NULL;
++    }
++}
++
++/* Match the same lowercase, escaped presentation as miekg/dns. In particular,
++   embedded dots are distinct from label separators, non-printable bytes use
++   decimal escapes, and an escaped space still contains a literal space. */
++static int regex_query_name(const char *domain, char *out, size_t capacity)
++{
++  const unsigned char *p = (const unsigned char *)domain;
++  size_t used = 0;
++
++  while (*p)
++    {
++      unsigned char c = *p++;
++      int separator = c == '.';
++
++      if (c == NAME_ESCAPE)
++        {
++          if (!*p)
++            return 0;
++          c = (*p++) - 1;
++        }
++
++      if (used + 4 >= capacity)
++        return 0;
++
++      if (c >= 'A' && c <= 'Z')
++        c += 'a' - 'A';
++
++      if (!separator && (c == '.' || c == ' ' || c == '\'' || c == '@' ||
++                         c == ';' || c == '(' || c == ')' || c == '"' || c == '\\'))
++        out[used++] = '\\';
++
++      if (c < ' ' || c > '~')
++        {
++          out[used++] = '\\';
++          out[used++] = '0' + c / 100;
++          out[used++] = '0' + (c / 10) % 10;
++          out[used++] = '0' + c % 10;
++        }
++      else
++        out[used++] = c;
++    }
++
++  out[used] = 0;
++  return 1;
++}
++
++/* C locale makes POSIX character classes/ranges stable independently of DHCP
++   internationalisation settings. It is process-lifetime state, not per query. */
++static locale_t server_regex_locale;
++
++static int lookup_regex_domain(char *domain, int flags, int *lowout, int *highout)
++{
++  char name[(MAXDNAME * 4) + 1];
++  int i, first = 0, last = 0, best_serial = INT_MAX;
++  locale_t previous;
++
++  if ((flags & F_CONFIG) || daemon->serverarray_native == daemon->serverarraysz)
++    return 0;
++
++  if (!regex_query_name(domain, name, sizeof(name)))
++    goto failed;
++
++  previous = uselocale(server_regex_locale);
++
++  for (i = daemon->serverarray_native; i < daemon->serverarraysz; i++)
++    {
++      struct server *serv = daemon->serverarray[i];
++      int low, high, rc;
++
++      /* Equivalent upstreams are one selector; preserve declaration order
++         between selectors and native --strict-order within their groups. */
++      if ((i > daemon->serverarray_native &&
++           order_servers(daemon->serverarray[i-1], serv) == 0) ||
++          serv->serial >= best_serial)
++        continue;
++
++      rc = regexec(serv->regex, name, 0, NULL, 0);
++      if (rc != 0 && rc != REG_NOMATCH)
++        {
++          uselocale(previous);
++          my_syslog(LOG_ERR, _("regex server match failed; refusing DNS query"));
++          goto failed;
++        }
++
++      if (rc == 0 && filter_servers(i, flags, &low, &high))
++        {
++          best_serial = serv->serial;
++          first = low;
++          last = high;
++        }
++    }
++
++  uselocale(previous);
++
++  if (first == last)
++    return 0;
++
++  if (lowout)
++    *lowout = first;
++  if (highout)
++    *highout = last;
++  return 1;
++
++ failed:
++  if (lowout)
++    *lowout = 0;
++  if (highout)
++    *highout = 0;
++  return -1;
++}
++
+ void build_server_array(void)
+ {
+   struct server *serv;
+@@ -61,6 +193,8 @@
+ 	  daemon->serverarray = new;
+ 	  daemon->serverarrayhwm = count;
+ 	}
++      else
++        die(_("cannot allocate DNS server array"), NULL, EC_NOMEM);
+     }
+ 
+   count = 0;
+@@ -80,6 +214,13 @@
+     daemon->serverarray[count] = serv;
+   
+   qsort(daemon->serverarray, daemon->serverarraysz, sizeof(struct server *), order_qsort);
++
++  /* Regex groups occupy a separate tail; they never enter the suffix binary
++     search, whose ordering must remain a strict total order. */
++  daemon->serverarray_native = daemon->serverarraysz;
++  while (daemon->serverarray_native > 0 &&
++         server_is_regex(daemon->serverarray[daemon->serverarray_native-1]))
++    daemon->serverarray_native--;
+   
+   /* servers need the location in the array to find all the whole
+      set of equivalent servers from a pointer to a single one. */
+@@ -103,15 +244,16 @@
+ */
+ int lookup_domain(char *domain, int flags, int *lowout, int *highout)
+ {
+-  int rc, crop_query, nodots;
++  int rc, crop_query, nodots, native_guard = 0;
++  int native_size = daemon->serverarray_native;
+   ssize_t qlen;
+   int try, high, low = 0;
+   int nlow = 0, nhigh = 0;
+   char *cp, *qdomain = domain;
+ 
+   /* may be no configured servers. */
+-  if (daemon->serverarraysz == 0)
+-    return 0;
++  if (native_size == 0)
++    return lookup_regex_domain(domain, flags, lowout, highout) > 0;
+   
+   /* find query length and presence of '.' */
+   for (cp = qdomain, nodots = 1, qlen = 0; *cp; qlen++, cp++)
+@@ -132,7 +274,7 @@
+ 	 we don't reset low to zero here, we can go further below and crop the 
+ 	 search string to the size of the largest remaining server
+ 	 when this match fails. */
+-      high = daemon->serverarraysz;
++      high = native_size;
+       crop_query = 1;
+       
+       /* binary search */
+@@ -171,7 +313,7 @@
+ 		     exits via the rc < 0 && high == try path above and this code is
+ 		     not executed. */
+ 		  ssize_t len, old = daemon->serverarray[try]->domain_len;
+-		  while (++try != daemon->serverarraysz)
++		  while (++try != native_size)
+ 		    {
+ 		      if (old != (len = daemon->serverarray[try]->domain_len))
+ 			{
+@@ -199,7 +341,7 @@
+ 	      
+ 	      if (!(qdomain == domain || *qdomain == 0 || *(qdomain-1) == '.'))
+ 		{
+-		  while (try < daemon->serverarraysz-1 && order(qdomain, qlen, daemon->serverarray[try+1]) == 0)
++		  while (try < native_size-1 && order(qdomain, qlen, daemon->serverarray[try+1]) == 0)
+ 		    try++;
+ 		  
+ 		  if (!(daemon->serverarray[try]->flags & SERV_WILDCARD))
+@@ -219,9 +361,14 @@
+ 		{
+ 		  crop_query = qlen;
+ 		  flags |= F_SERVER;
++                  native_guard = 1;
+ 		}
+ 	      else
+-		break;
++                {
++                  native_guard |= daemon->serverarray[nlow]->domain_len != 0 ||
++                    (daemon->serverarray[nlow]->flags & SERV_IS_LOCAL);
++                  break;
++                }
+ 	    }
+ 	}
+       
+@@ -243,9 +390,22 @@
+      These servers always sort to the very end of the array. 
+      A configured server eg server=/lan/ will take precdence. */
+   if (nodots &&
+-      (daemon->serverarray[daemon->serverarraysz-1]->flags & SERV_FOR_NODOTS) &&
++      (daemon->serverarray[native_size-1]->flags & SERV_FOR_NODOTS) &&
+       (nlow == nhigh || daemon->serverarray[nlow]->domain_len == 0))
+-    filter_servers(daemon->serverarraysz-1, flags, &nlow, &nhigh);
++    {
++      filter_servers(native_size-1, flags, &nlow, &nhigh);
++      if (nlow != nhigh)
++        native_guard = 1;
++    }
++
++  /* Native local/split-horizon rules and explicit standard-server guards keep
++     priority. Regex selectors only replace the ordinary default upstream. */
++  if (!native_guard)
++    {
++      int regex_result = lookup_regex_domain(domain, flags, lowout, highout);
++      if (regex_result != 0)
++        return regex_result > 0;
++    }
+   
+   if (lowout)
+     *lowout = nlow;
+@@ -506,6 +666,11 @@
+ {
+   int rc;
+ 
++  int r1 = server_is_regex(s1), r2 = server_is_regex(s2);
++
++  if (r1 || r2)
++    return r1 && r2 ? strcmp(s1->domain, s2->domain) : (r1 ? 1 : -1);
++
+   /* need full comparison of dotless servers in 
+      order_qsort() and filter_servers() */
+ 
+@@ -608,6 +773,7 @@
+        {
+          server_gone(serv);
+          *up = serv->next;
++	 free_server_regex(serv);
+ 	 free(serv->domain);
+ 	 free(serv);
+        }
+@@ -628,24 +794,73 @@
+ {
+   struct server *serv = NULL;
+   char *alloc_domain;
++  regex_t *regex = NULL;
+   
+   if (!domain)
+     domain = "";
+ 
+-  /* .domain == domain, for historical reasons. */
+-  if (*domain == '.')
+-    while (*domain == '.') domain++;
+-  else if (*domain == '*')
+-    {
+-      domain++;
+-      if (*domain != 0)
+-	flags |= SERV_WILDCARD;
+-    }
+-  
+-  if (*domain == 0)
+-    alloc_domain = whine_malloc(1);
++  if (strncmp(domain, REGEX_SERVER_PREFIX, REGEX_SERVER_PREFIX_LEN) == 0)
++    {
++      const char *pattern = domain + REGEX_SERVER_PREFIX_LEN;
++      const unsigned char *p;
++      int err;
++      locale_t previous;
++
++      /* A regex selector is an upstream rule, never a local answer or a
++         SERV_USE_RESOLV exception. Delimiters/control bytes are unsupported. */
++      if ((flags & (SERV_IS_LOCAL | SERV_FOR_NODOTS)) || !*pattern ||
++          strlen(pattern) > REGEX_SERVER_MAX_LENGTH)
++        return 0;
++
++      for (p = (const unsigned char *)pattern; *p; p++)
++        if (*p < ' ' || *p > '~' || *p == '/' || *p == '#' || *p == '"')
++          return 0;
++
++      if (!server_regex_locale &&
++          !(server_regex_locale = newlocale(LC_ALL_MASK, "C", (locale_t)0)))
++        return 0;
++
++      if (!(regex = whine_malloc(sizeof(regex_t))))
++        return 0;
++
++      previous = uselocale(server_regex_locale);
++      err = regcomp(regex, pattern, REG_EXTENDED | REG_NOSUB);
++      uselocale(previous);
++      if (err)
++        {
++          char reason[256];
++          regerror(err, regex, reason, sizeof(reason));
++          my_syslog(LOG_ERR, _("invalid regex server selector: %s"), reason);
++          free(regex);
++          return 0;
++        }
++
++      if (!(alloc_domain = whine_malloc(strlen(domain) + 1)))
++        {
++          regfree(regex);
++          free(regex);
++          return 0;
++        }
++      strcpy(alloc_domain, domain);
++    }
+   else
+-    alloc_domain = canonicalise((char *)domain, NULL);
++    {
++      /* .domain == domain, for historical reasons. */
++      if (*domain == '.')
++        while (*domain == '.') domain++;
++      else if (*domain == '*')
++        {
++          domain++;
++          if (*domain != 0)
++    	flags |= SERV_WILDCARD;
++        }
++  
++      if (*domain == 0)
++        alloc_domain = whine_malloc(1);
++      else
++        alloc_domain = canonicalise((char *)domain, NULL);
++
++    }
+ 
+   if (!alloc_domain)
+     return 0;
+@@ -690,7 +905,8 @@
+ 	  {
+ 	    tmp = serv->next;
+ 	    if ((serv->flags & SERV_MARK) &&
+-		hostname_isequal(alloc_domain, serv->domain))
++		(regex ? (server_is_regex(serv) && strcmp(alloc_domain, serv->domain) == 0) :
++                 (!server_is_regex(serv) && hostname_isequal(alloc_domain, serv->domain))))
+ 	      {
+ 		/* Need to move down? */
+ 		if (serv->next)
+@@ -708,6 +924,7 @@
+       
+       if (serv)
+ 	{
++          free_server_regex(serv);
+ 	  free(alloc_domain);
+ 	  alloc_domain = serv->domain;
+ 	}
+@@ -716,6 +933,11 @@
+ 	  if (!(serv = whine_malloc(sizeof(struct server))))
+ 	    {
+ 	      free(alloc_domain);
++              if (regex)
++                {
++                  regfree(regex);
++                  free(regex);
++                }
+ 	      return 0;
+ 	    }
+ 	  
+@@ -741,6 +963,8 @@
+ 	serv->source_addr = *source_addr;
+     }
+     
++  if (!(flags & SERV_IS_LOCAL))
++    serv->regex = regex;
+   serv->flags = flags;
+   serv->domain = alloc_domain;
+   serv->domain_len = strlen(alloc_domain);
+--- a/src/option.c
++++ b/src/option.c
+@@ -5369,9 +5369,9 @@
+   return 1;
+ }
+ 
+-static void read_file(char *file, FILE *f, int hard_opt, int from_script)	
++static int read_file(char *file, FILE *f, int hard_opt, int from_script)	
+ {
+-  volatile int lineno = 0;
++  volatile int lineno = 0, read_ok = 1;
+   char *buff = daemon->namebuff;
+   
+   while (fgets(buff, MAXDNAME, f))
+@@ -5387,7 +5387,10 @@
+       if (option != 0 || hard_opt == LOPT_REV_SERV)
+ 	{
+ 	  if (setjmp(mem_jmp))
+-	    continue;
++            {
++              read_ok = 0;
++              continue;
++            }
+ 	  mem_recover = 1;
+ 	}
+ 
+@@ -5496,6 +5499,7 @@
+ 	  
+       if (errmess || !one_opt(option, arg, daemon->namebuff, _("error"), 0, hard_opt == LOPT_REV_SERV))
+ 	{
++          read_ok = 0;
+ 	  if (from_script)
+ 	    sprintf(daemon->namebuff + strlen(daemon->namebuff), _(" in output from %s"), file);
+ 	  else
+@@ -5509,6 +5513,9 @@
+     }
+ 
+   mem_recover = 0;
++  if (ferror(f))
++    read_ok = 0;
++  return read_ok;
+ }
+ 
+ #if defined(HAVE_DHCP) && defined(HAVE_INOTIFY)
+@@ -5746,19 +5753,102 @@
+ void read_servers_file(void)
+ {
+   FILE *f;
++  struct server *old_servers, *old_tail, *old_local;
++  struct server *new_servers, *new_tail, *new_local, *serv;
++  struct server **new_array = NULL;
++  int read_ok, array_size = 0;
+ 
+   if (!(f = fopen(daemon->servers_file, "r")))
+     {
+        my_syslog(LOG_ERR, _("cannot read %s: %s"), daemon->servers_file, strerror(errno));
+        return;
+     }
+-  
++
++  /* Parse a candidate without mutating active records. A failed allocation or
++     regex compilation must not silently remove a protected selector after
++     successful validation in another process. The event loop is single-threaded. */
++  old_servers = daemon->servers;
++  old_tail = daemon->servers_tail;
++  old_local = daemon->local_domains;
++  daemon->servers = daemon->servers_tail = daemon->local_domains = NULL;
++  mark_servers(0);
++  read_ok = read_file(daemon->servers_file, f, LOPT_REV_SERV, 0);
++  if (fclose(f) != 0)
++    read_ok = 0;
++
++  if (read_ok)
++    {
++      /* Reserve array growth while all active records are still intact. Include
++         even loop-disabled records: check_servers may re-enable one later. */
++      for (serv = daemon->servers; serv; serv = serv->next)
++        array_size++;
++      for (serv = daemon->local_domains; serv; serv = serv->next)
++        array_size++;
++      for (serv = old_servers; serv; serv = serv->next)
++        if (!(serv->flags & SERV_FROM_FILE))
++          array_size++;
++      for (serv = old_local; serv; serv = serv->next)
++        if (!(serv->flags & SERV_FROM_FILE))
++          array_size++;
++      if (array_size > daemon->serverarrayhwm)
++        {
++          if (array_size > INT_MAX - 10)
++            read_ok = 0;
++          else
++            {
++              array_size += 10;
++              new_array = whine_malloc((size_t)array_size * sizeof(struct server *));
++              if (!new_array)
++                read_ok = 0;
++            }
++        }
++    }
++
++  if (!read_ok)
++    {
++      /* Every candidate belongs to SERV_FROM_FILE, including local exceptions. */
++      mark_servers(SERV_FROM_FILE);
++      cleanup_servers();
++      daemon->servers = old_servers;
++      daemon->servers_tail = old_tail;
++      daemon->local_domains = old_local;
++      my_syslog(LOG_ERR, _("servers-file reload rejected; keeping active servers"));
++      return;
++    }
++
++  new_servers = daemon->servers;
++  new_tail = daemon->servers_tail;
++  new_local = daemon->local_domains;
++  daemon->servers = old_servers;
++  daemon->servers_tail = old_tail;
++  daemon->local_domains = old_local;
++
++  /* Commit only the file-owned scope; all native configuration remains. */
+   mark_servers(SERV_FROM_FILE);
+-  read_file(daemon->servers_file, f, LOPT_REV_SERV, 0);
+-  fclose(f);
+   cleanup_servers();
++  if (new_servers)
++    {
++      if (daemon->servers_tail)
++        daemon->servers_tail->next = new_servers;
++      else
++        daemon->servers = new_servers;
++      daemon->servers_tail = new_tail;
++    }
++  if (new_local)
++    {
++      for (serv = new_local; serv->next; serv = serv->next);
++      serv->next = daemon->local_domains;
++      daemon->local_domains = new_local;
++    }
++  if (new_array)
++    {
++      free(daemon->serverarray);
++      daemon->serverarray = new_array;
++      daemon->serverarrayhwm = array_size;
++    }
+   check_servers(0);
+ }
++
+  
+ 
+ #ifdef HAVE_DHCP

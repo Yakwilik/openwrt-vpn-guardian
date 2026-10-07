@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -73,6 +74,7 @@ func TestNativeDnsmasqOwnsLocalQueriesWhenUpstreamIsDown(t *testing.T) {
 		}
 		if time.Now().After(until) {
 			b, _ := os.ReadFile(log.Name())
+			skipNativeRuntimeRestriction(t, b)
 			t.Fatalf("dnsmasq did not start: %v %s", err, b)
 		}
 		time.Sleep(30 * time.Millisecond)
@@ -94,5 +96,12 @@ func TestNativeDnsmasqOwnsLocalQueriesWhenUpstreamIsDown(t *testing.T) {
 	upstream.Shutdown()
 	if r, _, e := client.Exchange(new(dns.Msg).SetQuestion("printer.lan.", dns.TypeA), endpoint); e != nil || len(r.Answer) != 1 {
 		t.Fatalf("upstream outage broke native local DNS: %v %v", r, e)
+	}
+}
+
+func skipNativeRuntimeRestriction(t *testing.T, output []byte) {
+	t.Helper()
+	if strings.Contains(string(output), "cannot create netlink socket: Operation not permitted") {
+		t.Skip("native dnsmasq runtime requires a netlink socket forbidden by this execution sandbox")
 	}
 }

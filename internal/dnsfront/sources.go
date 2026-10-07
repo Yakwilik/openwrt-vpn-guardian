@@ -19,6 +19,8 @@ const StatePath = "/etc/vpn-guardian/dnsmasq-state.json"
 const WANResolvFile = "/tmp/resolv.conf.d/resolv.conf.auto"
 const GuardName = "vpn-guardian-local.conf"
 const LocalConfigPath = "/etc/vpn-guardian/dnsmasq-local.conf"
+const SelectorsDir = "/etc/vpn-guardian/dnsmasq.d"
+const SelectorsPath = SelectorsDir + "/proxy.servers"
 const BootstrapInit = "/etc/init.d/vpn-guardian-dns-bootstrap"
 const BootstrapStatic = "/etc/vpn-guardian/bootstrap-resolv.static"
 const BootstrapResolv = "/tmp/vpn-guardian-resolv.conf"
@@ -37,24 +39,30 @@ type Option struct {
 }
 
 type State struct {
-	StaticData   []byte            `json:"staticData,omitempty"`
-	StaticExists bool              `json:"staticExists"`
-	HookData     []byte            `json:"hookData,omitempty"`
-	HookExists   bool              `json:"hookExists"`
-	LocalConfig  []byte            `json:"localConfig,omitempty"`
-	LocalExists  bool              `json:"localExists"`
-	BootConfig   []byte            `json:"bootConfig,omitempty"`
-	BootExists   bool              `json:"bootExists"`
-	Version      int               `json:"version"`
-	Section      string            `json:"section"`
-	MainConfig   string            `json:"mainConfig"`
-	ConfDir      string            `json:"confDir"`
-	Sources      Sources           `json:"sources"`
-	Options      map[string]Option `json:"options"`
-	Guard        []byte            `json:"guard,omitempty"`
-	GuardExists  bool              `json:"guardExists"`
-	ResolvLink   string            `json:"resolvLink,omitempty"`
-	ResolvData   []byte            `json:"resolvData,omitempty"`
+	SelectorsData      []byte            `json:"selectorsData,omitempty"`
+	SelectorsExists    bool              `json:"selectorsExists"`
+	SelectorsMode      os.FileMode       `json:"selectorsMode,omitempty"`
+	SelectorsDirExists bool              `json:"selectorsDirExists"`
+	SelectorsDirMode   os.FileMode       `json:"selectorsDirMode,omitempty"`
+	SelectorsCaptured  bool              `json:"selectorsCaptured,omitempty"`
+	StaticData         []byte            `json:"staticData,omitempty"`
+	StaticExists       bool              `json:"staticExists"`
+	HookData           []byte            `json:"hookData,omitempty"`
+	HookExists         bool              `json:"hookExists"`
+	LocalConfig        []byte            `json:"localConfig,omitempty"`
+	LocalExists        bool              `json:"localExists"`
+	BootConfig         []byte            `json:"bootConfig,omitempty"`
+	BootExists         bool              `json:"bootExists"`
+	Version            int               `json:"version"`
+	Section            string            `json:"section"`
+	MainConfig         string            `json:"mainConfig"`
+	ConfDir            string            `json:"confDir"`
+	Sources            Sources           `json:"sources"`
+	Options            map[string]Option `json:"options"`
+	Guard              []byte            `json:"guard,omitempty"`
+	GuardExists        bool              `json:"guardExists"`
+	ResolvLink         string            `json:"resolvLink,omitempty"`
+	ResolvData         []byte            `json:"resolvData,omitempty"`
 }
 
 func rooted(root, path string) string { return filepath.Join(root, strings.TrimPrefix(path, "/")) }
