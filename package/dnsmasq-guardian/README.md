@@ -48,13 +48,13 @@ configuration. The existing instance configuration supplies the value.
 ## Release artifacts
 
 The release pipeline cross-compiles two independent package variants for each
-OpenWrt 24.10.4 SDK target: `dnsmasq-full_2.90-r5.1_<arch>.openwrt.ipk`
-and `dnsmasq-full_2.90-r5.1_<arch>.glinet.ipk`. **Install only one**,
+OpenWrt 24.10.4 SDK target: *dnsmasq-full_2.90-r5.1_ARCH.openwrt.ipk*
+and *dnsmasq-full_2.90-r5.1_ARCH.glinet.ipk*. **Install only one**,
 according to the firmware's dnsmasq init/marking contract. Both archives
-declare the same opkg package name `dnsmasq-full` internally; the filename
+declare the same opkg package name *dnsmasq-full* internally; the filename
 suffix is for human selection, not an additional package name.
 
-Releases also include `dnsmasq-2.90.tar.xz` and its checksum, the exact
+Releases also include *dnsmasq-2.90.tar.xz* and its checksum, the exact
 pinned recipe and security/feature patches in the tagged repository, and a
 per-variant IPK checksum and build-provenance report. Installing either variant
 requires matching target architecture, package libraries and OpenWrt 24.10.4
