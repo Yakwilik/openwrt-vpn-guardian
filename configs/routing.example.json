@@ -13,7 +13,9 @@
     "domain:jetbrains.com",
     "domain:descriptusercontent.com",
     "domain:descript.com",
-    "domain:buf.build"
+    "domain:buf.build",
+    "domain:heygen.com",
+    "domain:heygen.ai"
   ],
   "proxyIps": [],
   "notes": {
@@ -29,6 +31,8 @@
     "domain:jetbrains.com": "Обновления JetBrains IDE и Toolbox",
     "domain:buf.build": "Buf Schema Registry",
     "domain:descript.com": "Descript: веб-приложение, API, авторизация, транскрипция и first-party CDN",
-    "domain:descriptusercontent.com": "Descript: пользовательские медиа, файлы и assets"
+    "domain:descriptusercontent.com": "Descript: пользовательские медиа, файлы и assets",
+    "domain:heygen.com": "HeyGen: веб-приложение, API и first-party сервисы",
+    "domain:heygen.ai": "HeyGen: сгенерированные видео и media/CDN (files2, resource2)"
   }
 }

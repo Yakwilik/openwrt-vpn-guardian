@@ -116,6 +116,8 @@ func DefaultRouting() Routing {
 			"domain:jetbrains.com",
 			"domain:descript.com",
 			"domain:descriptusercontent.com",
+			"domain:heygen.com",
+			"domain:heygen.ai",
 			"domain:buf.build",
 		},
 		Notes: map[string]string{
@@ -131,6 +133,8 @@ func DefaultRouting() Routing {
 			"domain:jetbrains.com":           "Обновления JetBrains IDE и Toolbox",
 			"domain:descript.com":            "Descript: веб-приложение, API, авторизация, транскрипция и first-party CDN",
 			"domain:descriptusercontent.com": "Descript: пользовательские медиа, файлы и assets",
+			"domain:heygen.com":              "HeyGen: веб-приложение, API и first-party сервисы",
+			"domain:heygen.ai":               "HeyGen: сгенерированные видео и media/CDN (files2, resource2)",
 			"domain:buf.build":               "Buf Schema Registry",
 		},
 	}
