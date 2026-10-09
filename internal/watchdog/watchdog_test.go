@@ -190,6 +190,7 @@ func TestApplicationProbesAreRequired(t *testing.T) {
 				"cloudflare": 204,
 				"telegram":   401,
 				"openai":     401,
+				"chatgpt":    401,
 			},
 			want: "healthy",
 		},
@@ -200,6 +201,15 @@ func TestApplicationProbesAreRequired(t *testing.T) {
 				"cloudflare": 204,
 				"telegram":   401,
 				"openai":     403,
+				"chatgpt":    401,
+			},
+			want: "down",
+		},
+		{
+			name: "chatgpt forbidden rejects otherwise healthy node",
+			codes: map[string]int{
+				"google": 204, "cloudflare": 204, "telegram": 401,
+				"openai": 401, "chatgpt": 403,
 			},
 			want: "down",
 		},
@@ -210,6 +220,7 @@ func TestApplicationProbesAreRequired(t *testing.T) {
 				"cloudflare": 204,
 				"telegram":   503,
 				"openai":     401,
+				"chatgpt":    401,
 			},
 			want: "down",
 		},
@@ -220,6 +231,7 @@ func TestApplicationProbesAreRequired(t *testing.T) {
 				"cloudflare": 204,
 				"telegram":   401,
 				"openai":     401,
+				"chatgpt":    401,
 			},
 			want: "healthy",
 		},
@@ -230,6 +242,7 @@ func TestApplicationProbesAreRequired(t *testing.T) {
 				"cloudflare": 0,
 				"telegram":   401,
 				"openai":     401,
+				"chatgpt":    401,
 			},
 			want: "degraded",
 		},
@@ -322,5 +335,43 @@ func TestDesiredPolicyRuntimeFailOpenStabilizesOnHealth(t *testing.T) {
 				t.Fatalf("runtime = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestChatGPTBackendProbeIsRequired(t *testing.T) {
+	target, ok := healthTargetByName("chatgpt")
+	if !ok || !target.Required {
+		t.Fatal("ChatGPT backend probe must be required")
+	}
+	if target.URL != "https://chatgpt.com/backend-api/me" {
+		t.Fatalf("unexpected read-only ChatGPT endpoint %q", target.URL)
+	}
+	if !target.accepts(401) || target.accepts(403) {
+		t.Fatal("401 proves anonymous access, but 403 rejects a blocked egress")
+	}
+}
+
+func TestPendingHealthFailuresAreNotDashboardEvents(t *testing.T) {
+	if got := dashboardEventType("health failed (1/2): transient timeout"); got != "" {
+		t.Fatalf("one failure must not be a dashboard event: %q", got)
+	}
+	if got := dashboardEventType("health failed (2/2): persistent timeout"); got != "health" {
+		t.Fatalf("confirmed failure event type = %q", got)
+	}
+}
+
+func TestCandidateBatchBoundedAndOrdered(t *testing.T) {
+	candidates := []RankedCandidate{
+		{Candidate: Candidate{Name: "one"}},
+		{Candidate: Candidate{Name: "two"}},
+		{Candidate: Candidate{Name: "three"}},
+		{Candidate: Candidate{Name: "four"}},
+	}
+	batch := candidateAttemptBatch(candidates)
+	if len(batch) != 3 || batch[0].Name != "one" || batch[2].Name != "three" {
+		t.Fatalf("incorrect batch: %+v", batch)
+	}
+	if got := candidateAttemptBatch(candidates[:2]); len(got) != 2 {
+		t.Fatalf("small batch length = %d", len(got))
 	}
 }

@@ -24,7 +24,7 @@ export function StatusOverview({ status }: StatusOverviewProps) {
           <h1>{statusHeadline(status)}</h1>
           <p>
             {status
-              ? `${modeLabel(status.control_mode)} · ${policyLabel(status.failure_policy)} · ${status.health_count}/4 checks`
+              ? `${modeLabel(status.control_mode)} · ${policyLabel(status.failure_policy)} · ${status.health_count}/${status.health_total || 4} checks`
               : "Читаю состояние роутера…"}
           </p>
         </div>
@@ -55,7 +55,7 @@ export function StatusOverview({ status }: StatusOverviewProps) {
         />
         <Metric
           label="Backend"
-          value={status ? `${status.health_count}/4` : "—"}
+          value={status ? `${status.health_count}/${status.health_total || 4}` : "—"}
           detail={status ? `Failures: ${status.failures}` : "—"}
         />
         <Metric

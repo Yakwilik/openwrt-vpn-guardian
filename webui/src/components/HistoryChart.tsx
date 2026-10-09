@@ -54,7 +54,7 @@ export function HistoryChart({ history }: { history?: HistoryResponse }) {
 
       <div className="chart-summary">
         <span>
-          Сейчас <strong>{latest ? `${latest.health}/4` : "—"}</strong>
+          Сейчас <strong>{latest ? `${latest.health}/${latest.total || 4}` : "—"}</strong>
         </span>
         <span>
           Переключений <strong>{switches.length}</strong>

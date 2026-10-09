@@ -121,6 +121,7 @@ type Status struct {
 	NodesTotal          int                    `json:"nodes_total"`
 	Services            ServiceStatus          `json:"services"`
 	TProxy              TProxyStatus           `json:"tproxy"`
+	HealthTotal         int                    `json:"health_total"`
 	HealthCount         int                    `json:"health_count"`
 	HealthStatus        string                 `json:"health_status"`
 	Health              map[string]HealthBrief `json:"health"`
@@ -208,6 +209,10 @@ func collectSnapshot(rt *runtimeState) (Status, error) {
 	out.LastFailedAt = state.LastFailure
 	out.LastFailedNode = state.LastFailedNode
 	out.HealthCount = state.LastHealth.Passed
+	out.HealthTotal = state.LastHealth.Total
+	if out.HealthTotal <= 0 {
+		out.HealthTotal = len(state.LastHealth.Results)
+	}
 	out.HealthStatus = state.LastHealth.Status
 	out.Health = make(map[string]HealthBrief, len(state.LastHealth.Results))
 	for _, p := range state.LastHealth.Results {
@@ -497,7 +502,11 @@ func appendHistory(rt *runtimeState, s Status, path string) {
 		return
 	}
 	availability := historyAvailability(s.HealthStatus)
-	failed := 4 - s.HealthCount
+	total := s.HealthTotal
+	if total <= 0 {
+		total = 4
+	}
+	failed := total - s.HealthCount
 	if failed < 0 {
 		failed = 0
 	}
@@ -505,9 +514,10 @@ func appendHistory(rt *runtimeState, s Status, path string) {
 	if rt.lastNode != "" && s.Node != "" && s.Node != rt.lastNode {
 		switchFlag = 1
 	}
-	line := fmt.Sprintf("%d\t%d\t%d\t%d\t%s\t%d\t%s\n",
+	// The last field is optional for readers of historical 7-column records.
+	line := fmt.Sprintf("%d\t%d\t%d\t%d\t%s\t%d\t%s\t%d\n",
 		s.Now, availability, s.HealthCount, failed, s.Overall, switchFlag,
-		strings.NewReplacer("\t", " ", "\n", " ").Replace(s.Node))
+		strings.NewReplacer("\t", " ", "\n", " ").Replace(s.Node), total)
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err == nil {
 		_, _ = f.WriteString(line)

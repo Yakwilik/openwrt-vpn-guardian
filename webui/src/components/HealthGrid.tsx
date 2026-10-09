@@ -14,7 +14,7 @@ export function HealthGrid({ status }: HealthGridProps) {
           <h2>VPN backend health</h2>
           <p>Независимые проверки внешней доступности через VPN.</p>
         </div>
-        <span className="panel-counter">{status?.health_count ?? 0}/4</span>
+        <span className="panel-counter">{status?.health_count ?? 0}/{status?.health_total || 4}</span>
       </div>
 
       <div className="dns-health-list">
@@ -50,6 +50,7 @@ const expectedHealthCodes: Record<string, number[]> = {
   cloudflare: [204],
   telegram: [401],
   openai: [401],
+  chatgpt: [401],
 };
 
 function probeHealthy(name: string, code: number): boolean {

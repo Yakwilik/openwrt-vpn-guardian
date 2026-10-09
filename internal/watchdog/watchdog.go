@@ -145,6 +145,12 @@ var healthTargets = []healthTarget{
 		Required:       true,
 		ExpectedStatus: []int{http.StatusUnauthorized},
 	},
+	{
+		Name:           "chatgpt",
+		URL:            "https://chatgpt.com/backend-api/me",
+		Required:       true,
+		ExpectedStatus: []int{http.StatusUnauthorized},
+	},
 }
 
 func main() {
@@ -401,6 +407,9 @@ func rankCandidates(cs []Candidate, s State, activeID, activeSub int) ([]RankedC
 
 func dashboardEventType(msg string) string {
 	switch {
+	case strings.Contains(msg, "health failed (1/2)"):
+		// A single missed probe is not an event until confirmed.
+		return ""
 	case strings.HasPrefix(msg, "front "):
 		return "front"
 	case strings.Contains(msg, "backend listener recovered"):
@@ -544,7 +553,15 @@ func health(timeout time.Duration) HealthResult {
 			p := ProbeResult{Name: t.Name, URL: t.URL}
 			ctx, cancel := context.WithTimeout(context.Background(), timeout)
 			defer cancel()
-			req, _ := http.NewRequestWithContext(ctx, http.MethodGet, t.URL, nil)
+			// A read-only unauthorized request avoids posting to the
+			// private Codex API on every 10-second watchdog interval.
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, t.URL, nil)
+			if err != nil {
+				p.Error = err.Error()
+				p.MS = time.Since(start).Milliseconds()
+				result.Results[i] = p
+				return
+			}
 			resp, err := client.Do(req)
 			p.MS = time.Since(start).Milliseconds()
 			if err != nil {
@@ -581,10 +598,10 @@ func classifyHealth(result *HealthResult) {
 	case !requiredOK:
 		result.Status = "down"
 		result.Healthy = false
-	case result.Passed >= 3:
+	case result.Passed >= result.Total-1:
 		result.Status = "healthy"
 		result.Healthy = true
-	case result.Passed == 2:
+	case result.Passed >= result.Total-2:
 		result.Status = "degraded"
 		result.Healthy = false
 	default:
@@ -822,10 +839,10 @@ func run(logHealthy bool) error {
 		return true
 	}
 
-	for i, r := range ready {
-		if i >= 1 {
-			break
-		}
+	// Try a bounded batch instead of waiting for two more failed daemon
+	// iterations after each rejected candidate.
+	batch := candidateAttemptBatch(ready)
+	for _, r := range batch {
 		if try(r, false) {
 			return nil
 		}
@@ -836,11 +853,29 @@ func run(logHealthy bool) error {
 		}
 	}
 
+	// A large subscription must not spend two additional confirmations
+	// between batches of already ranked, untried nodes.
+	if len(batch) < len(ready) {
+		s.Failures = 1
+		s.LastError = "no healthy backend node found in tested batch"
+		saveState(s)
+		logLine("no healthy backend node found in tested batch; continuing candidate scan")
+		return nil
+	}
 	s.Failures = 0
 	s.LastError = "no healthy backend node found"
 	saveState(s)
 	logLine("no healthy backend node found")
 	return nil
+}
+
+const maxCandidateAttemptsPerIteration = 3
+
+func candidateAttemptBatch(ready []RankedCandidate) []RankedCandidate {
+	if len(ready) > maxCandidateAttemptsPerIteration {
+		return ready[:maxCandidateAttemptsPerIteration]
+	}
+	return ready
 }
 
 func inspect() error {

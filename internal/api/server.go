@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/Yakwilik/openwrt-vpn-guardian/internal/config"
@@ -93,12 +96,43 @@ func handleHTTPHistory(w http.ResponseWriter, r *http.Request) {
 	events = append(events, reconstructEvents(samples)...)
 	events = normalizeEvents(events, 500)
 
-	_, offset := time.Now().Zone()
+	offset := routerTZOffset()
 	writeHTTPJSON(w, http.StatusOK, HistoryResponse{
 		RouterTZOffset: offset,
 		Samples:        samples,
 		Events:         events,
 	})
+}
+
+// Go may see UTC on OpenWrt even when BusyBox uses /etc/TZ (e.g. MSK-3).
+// Ask the router's date implementation for its actual local UTC offset.
+func routerTZOffset() int {
+	_, fallback := time.Now().Zone()
+	raw, err := exec.Command("/bin/date", "+%z").Output()
+	if err != nil {
+		return fallback
+	}
+	offset, ok := parseTZOffset(strings.TrimSpace(string(raw)))
+	if !ok {
+		return fallback
+	}
+	return offset
+}
+
+func parseTZOffset(raw string) (int, bool) {
+	if len(raw) != 5 || (raw[0] != '+' && raw[0] != '-') {
+		return 0, false
+	}
+	hours, errH := strconv.Atoi(raw[1:3])
+	minutes, errM := strconv.Atoi(raw[3:5])
+	if errH != nil || errM != nil || hours > 23 || minutes > 59 {
+		return 0, false
+	}
+	offset := (hours*60 + minutes) * 60
+	if raw[0] == '-' {
+		offset = -offset
+	}
+	return offset, true
 }
 
 func writeHTTPJSON(w http.ResponseWriter, status int, v any) {

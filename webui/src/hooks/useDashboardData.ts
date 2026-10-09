@@ -46,7 +46,7 @@ export function useDashboardData() {
   useEffect(() => {
     void refreshAll();
     const statusTimer = window.setInterval(() => void loadStatus(), 5_000);
-    const historyTimer = window.setInterval(() => void loadHistory(), 60_000);
+    const historyTimer = window.setInterval(() => void loadHistory(), 15_000);
     const controlTimer = window.setInterval(() => void loadControl(), 60_000);
 
     return () => {

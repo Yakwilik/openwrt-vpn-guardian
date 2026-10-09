@@ -49,11 +49,13 @@ export interface StatusSnapshot {
   services: Record<string, string>;
   tproxy: TProxyStatus;
   health_count: number;
+  health_total: number;
   health: Record<string, HealthProbe>;
 }
 
 export interface HistorySample {
   ts: number;
+  total: number;
   availability: number;
   health: number;
   failed: number;
