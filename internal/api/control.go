@@ -33,22 +33,23 @@ type session struct {
 }
 
 type controlRequest struct {
-	NodeKey             string               `json:"nodeKey,omitempty"`
-	Action              string               `json:"action"`
-	PIN                 string               `json:"pin,omitempty"`
-	Enabled             bool                 `json:"enabled,omitempty"`
-	ID                  int                  `json:"id,omitempty"`
-	Sub                 int                  `json:"sub,omitempty"`
-	URL                 string               `json:"url,omitempty"`
-	Remarks             string               `json:"remarks,omitempty"`
-	AutoSelect          bool                 `json:"autoSelect,omitempty"`
-	Confirm             string               `json:"confirm,omitempty"`
-	Service             string               `json:"service,omitempty"`
-	Transports          []config.Transport   `json:"transports,omitempty"`
-	Rules               []config.RoutingRule `json:"rules,omitempty"`
-	DNSMode             string               `json:"dnsMode,omitempty"`
-	DNSOnlyProxyDomains *bool                `json:"dnsOnlyProxyDomains,omitempty"`
-	DNSResolvers        []string             `json:"dnsResolvers,omitempty"`
+	NodeKey             string                 `json:"nodeKey,omitempty"`
+	Action              string                 `json:"action"`
+	PIN                 string                 `json:"pin,omitempty"`
+	Enabled             bool                   `json:"enabled,omitempty"`
+	ID                  int                    `json:"id,omitempty"`
+	Sub                 int                    `json:"sub,omitempty"`
+	URL                 string                 `json:"url,omitempty"`
+	Remarks             string                 `json:"remarks,omitempty"`
+	AutoSelect          bool                   `json:"autoSelect,omitempty"`
+	Confirm             string                 `json:"confirm,omitempty"`
+	Service             string                 `json:"service,omitempty"`
+	Transports          []config.Transport     `json:"transports,omitempty"`
+	Rules               []config.RoutingRule   `json:"rules,omitempty"`
+	Groups              *[]config.RoutingGroup `json:"groups,omitempty"`
+	DNSMode             string                 `json:"dnsMode,omitempty"`
+	DNSOnlyProxyDomains *bool                  `json:"dnsOnlyProxyDomains,omitempty"`
+	DNSResolvers        []string               `json:"dnsResolvers,omitempty"`
 }
 
 type transportOptionResponse struct {
@@ -68,6 +69,7 @@ type routingRuleOptionResponse struct {
 
 type routingResponse struct {
 	Rules   []config.RoutingRule        `json:"rules"`
+	Groups  []config.RoutingGroup       `json:"groups"`
 	Options []routingRuleOptionResponse `json:"options"`
 }
 
@@ -320,6 +322,7 @@ func makeRoutingResponse(routing config.Routing) (routingResponse, error) {
 	}
 	return routingResponse{
 		Rules:   rules,
+		Groups:  append([]config.RoutingGroup{}, routing.Groups...),
 		Options: options,
 	}, nil
 }

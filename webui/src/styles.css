@@ -957,20 +957,124 @@ button:disabled {
   margin-top: 12px;
 }
 
-.routing-list {
-  max-height: 430px;
-  overflow: auto;
+.routing-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 14px 0 12px;
+}
+
+.routing-toolbar > .field {
+  flex: 1 1 300px;
+  min-width: 180px;
+}
+
+.routing-groups {
+  display: grid;
+  gap: 9px;
+  margin-top: 12px;
+}
+
+.routing-group {
   border: 1px solid var(--border-soft);
-  border-radius: 12px;
+  background: rgba(7, 16, 22, 0.28);
+  border-radius: 13px;
+  overflow: hidden;
+}
+
+.routing-group-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 61px;
+  padding: 3px 10px 3px 3px;
+}
+
+.routing-group-toggle {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: none;
+  border: 0;
+  text-align: left;
+  padding: 11px 8px;
+  cursor: pointer;
+  color: var(--text);
+}
+
+.routing-group-toggle:hover {
+  color: var(--accent-strong);
+}
+
+.routing-chevron {
+  width: 14px;
+  flex-shrink: 0;
+  color: var(--muted);
+}
+
+.routing-group-labels {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  flex: 1;
+}
+
+.routing-group-labels strong {
+  font-size: 13px;
+  font-weight: 730;
+}
+
+.routing-group-description {
+  color: var(--muted);
+  line-height: 1.35;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.routing-group-count {
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  min-width: 31px;
+  padding: 4px 7px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--muted-strong);
+}
+
+.routing-group-actions,
+.routing-row-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 5px;
+}
+
+.button-small {
+  min-height: 30px;
+  padding: 0 9px;
+  font-size: 11px;
+}
+
+.routing-group-actions .button,
+.routing-row-actions .button {
+  white-space: nowrap;
+  font-size: 11px;
+}
+
+.routing-group-body {
+  border-top: 1px solid var(--border-soft);
 }
 
 .routing-row {
-  min-height: 46px;
   display: grid;
-  grid-template-columns: 86px minmax(0, 1fr) auto;
-  gap: 10px;
+  grid-template-columns: 84px minmax(0, 1fr) auto;
+  gap: 9px;
   align-items: center;
-  padding: 7px 10px;
+  min-height: 46px;
+  padding: 7px 12px;
   border-bottom: 1px solid var(--border-soft);
 }
 
@@ -978,11 +1082,15 @@ button:disabled {
   border-bottom: 0;
 }
 
+.routing-row:hover {
+  background: rgba(120, 184, 255, 0.025);
+}
+
 .routing-type {
   display: inline-flex;
+  align-items: center;
   width: fit-content;
   min-height: 23px;
-  align-items: center;
   padding: 0 7px;
   border: 1px solid #2b414e;
   border-radius: 7px;
@@ -1000,47 +1108,110 @@ button:disabled {
 }
 
 .routing-value {
+  color: var(--muted-strong);
   min-width: 0;
   overflow: hidden;
-  color: var(--muted-strong);
-  font-size: 12px;
   white-space: nowrap;
   text-overflow: ellipsis;
+  font-size: 12px;
 }
 
 .routing-note {
-  overflow: hidden;
   color: var(--muted);
-  font-size: 11px;
-  line-height: 1.35;
+  min-width: 0;
+  overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
-}
-
-.routing-note-empty {
-  color: #5f737f;
-  font-style: italic;
+  font-size: 11px;
 }
 
 .routing-add {
   display: grid;
-  grid-template-columns: 170px minmax(0, 1.1fr) minmax(0, 1.2fr) auto;
+  grid-template-columns: 118px minmax(150px, 1fr) minmax(120px, .75fr) minmax(140px, .95fr) auto;
   gap: 8px;
-  margin-top: 11px;
+  align-items: center;
+  margin-top: 12px;
+}
+
+.routing-add-caption {
+  margin: 7px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.routing-group-editor {
+  padding: 12px;
+  display: grid;
+  grid-template-columns: minmax(170px, .75fr) minmax(200px, 1.3fr) auto;
+  gap: 8px;
+  background: rgba(120, 184, 255, .035);
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.routing-group-editor .row-actions {
+  align-items: center;
+}
+
+.routing-group-delete {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 10px 12px;
+  background: var(--danger-bg);
+  border-top: 1px solid var(--border-soft);
+  font-size: 12px;
+  color: var(--muted-strong);
+}
+
+.routing-group-delete span {
+  flex: 1 1 230px;
+}
+
+.routing-group-empty {
+  padding: 14px 12px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.routing-add-to-group {
+  margin: 9px 12px;
+}
+
+.routing-rule-editor {
+  padding: 10px;
+  display: grid;
+  grid-template-columns: 115px minmax(130px, 1fr) 130px minmax(130px, 1fr);
+  gap: 8px;
+  align-items: center;
+  background: rgba(120, 184, 255, 0.045);
+}
+
+.routing-rule-editor .row-actions {
+  grid-column: 1 / -1;
+  justify-content: flex-end;
+}
+
+.routing-feedback {
+  margin-top: 10px;
+  border-left: 2px solid var(--accent);
+  padding: 6px 10px;
+  color: var(--muted-strong);
+  font-size: 12px;
 }
 
 .routing-footer {
   display: flex;
-  align-items: flex-end;
+  align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin-top: 9px;
+  margin-top: 14px;
 }
 
 .routing-footer .inline-note {
   max-width: 620px;
 }
-
 .dns-settings {
   display: grid;
   grid-template-columns: minmax(260px, 0.9fr) minmax(320px, 1.1fr);
@@ -1408,3 +1579,52 @@ button:disabled {
 
 .dns-health-list { display: grid; gap: 8px; margin-bottom: 12px; }
 .dns-scope-toggle { margin-top: 14px; align-items: center; }
+
+
+@media (max-width: 860px) {
+  .routing-add {
+    grid-template-columns: 1fr 1fr;
+  }
+  .routing-add .button {
+    grid-column: 1 / -1;
+  }
+  .routing-group-editor {
+    grid-template-columns: 1fr;
+  }
+  .routing-rule-editor {
+    grid-template-columns: 1fr 1fr;
+  }
+  .routing-row {
+    grid-template-columns: 78px minmax(0, 1fr);
+  }
+  .routing-row-actions {
+    grid-column: 1 / -1;
+    justify-content: flex-start;
+  }
+}
+
+@media (max-width: 540px) {
+  .routing-toolbar > .field {
+    flex-basis: 100%;
+  }
+  .routing-group-head {
+    flex-wrap: wrap;
+  }
+  .routing-group-actions {
+    width: 100%;
+    padding-left: 25px;
+    justify-content: flex-start;
+  }
+  .routing-add,
+  .routing-rule-editor {
+    grid-template-columns: 1fr;
+  }
+  .routing-add .button,
+  .routing-rule-editor .row-actions {
+    grid-column: auto;
+  }
+  .routing-footer {
+    align-items: stretch;
+    flex-direction: column;
+  }
+}

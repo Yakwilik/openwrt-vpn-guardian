@@ -147,6 +147,8 @@ type Routing struct {
 	ProxyDomains []string          `json:"proxyDomains"`
 	ProxyIPs     []string          `json:"proxyIps"`
 	Notes        map[string]string `json:"notes,omitempty"`
+	Groups       []RoutingGroup    `json:"groups,omitempty"`
+	RuleGroups   map[string]string `json:"ruleGroups,omitempty"`
 }
 
 func DefaultStack(lanInterface, lanCIDR, wanInterface, assetsDir string) Stack {
@@ -210,6 +212,32 @@ func DefaultRouting() Routing {
 			"domain:heygen.com",
 			"domain:heygen.ai",
 			"domain:buf.build",
+		},
+		Groups: []RoutingGroup{
+			{ID: "telegram", Name: "Telegram", Description: "Домены и адреса Telegram"},
+			{ID: "openai", Name: "OpenAI / ChatGPT", Description: "ChatGPT, API и связанные сервисы OpenAI"},
+			{ID: "ai", Name: "Другие AI-сервисы", Description: "Anthropic и Google Gemini"},
+			{ID: "development", Name: "Разработка", Description: "GitHub, JetBrains и Buf Schema Registry"},
+			{ID: "social", Name: "Мессенджеры и соцсети", Description: "WhatsApp и LinkedIn"},
+			{ID: "media", Name: "Видео и музыка", Description: "YouTube и SoundCloud"},
+			{ID: "content", Name: "Создание контента", Description: "Descript и HeyGen"},
+		},
+		RuleGroups: map[string]string{
+			"geosite:telegram":               "telegram",
+			"geosite:openai":                 "openai",
+			"geosite:anthropic":              "ai",
+			"geosite:google-gemini":          "ai",
+			"geosite:github":                 "development",
+			"domain:jetbrains.com":           "development",
+			"domain:buf.build":               "development",
+			"geosite:whatsapp":               "social",
+			"geosite:linkedin":               "social",
+			"geosite:youtube":                "media",
+			"geosite:soundcloud":             "media",
+			"domain:descript.com":            "content",
+			"domain:descriptusercontent.com": "content",
+			"domain:heygen.com":              "content",
+			"domain:heygen.ai":               "content",
 		},
 		Notes: map[string]string{
 			"geosite:openai":                 "OpenAI / ChatGPT",
@@ -478,6 +506,31 @@ func (r Routing) RulesUnchecked() ([]RoutingRule, error) {
 		if _, err := normalizeRoutingNote(note); err != nil {
 			return nil, fmt.Errorf("routing note for %q: %w", raw, err)
 		}
+	}
+	groups := make(map[string]struct{}, len(r.Groups))
+	for i, group := range r.Groups {
+		if err := validateRoutingGroup(group); err != nil {
+			return nil, fmt.Errorf("routing group %d: %w", i, err)
+		}
+		if _, exists := groups[group.ID]; exists {
+			return nil, fmt.Errorf("duplicate routing group id %q", group.ID)
+		}
+		groups[group.ID] = struct{}{}
+	}
+	for raw, groupID := range r.RuleGroups {
+		if _, exists := stored[raw]; !exists {
+			return nil, fmt.Errorf("routing group mapping refers to unknown rule %q", raw)
+		}
+		if _, exists := groups[groupID]; !exists {
+			return nil, fmt.Errorf("routing rule %q refers to unknown group %q", raw, groupID)
+		}
+	}
+	for i := range rules {
+		storedValue, _, err := rules[i].storedValue()
+		if err != nil {
+			return nil, err
+		}
+		rules[i].Group = r.RuleGroups[storedValue]
 	}
 	return rules, nil
 }

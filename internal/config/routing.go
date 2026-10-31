@@ -5,6 +5,7 @@ import (
 	"net"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 )
 
 type RoutingRuleType string
@@ -22,6 +23,32 @@ type RoutingRule struct {
 	Type  RoutingRuleType `json:"type"`
 	Value string          `json:"value"`
 	Note  string          `json:"note,omitempty"`
+	Group string          `json:"group,omitempty"`
+}
+
+// RoutingGroup is display metadata and never changes the network dataplane.
+type RoutingGroup struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+}
+
+var routingGroupIDPattern = regexp.MustCompile("^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
+
+func validateRoutingGroup(g RoutingGroup) error {
+	if !routingGroupIDPattern.MatchString(g.ID) {
+		return fmt.Errorf("invalid group id %q", g.ID)
+	}
+	if strings.TrimSpace(g.Name) != g.Name || g.Name == "" ||
+		utf8.RuneCountInString(g.Name) > 80 || strings.ContainsAny(g.Name, "\r\n\x00") {
+		return fmt.Errorf("group name must have 1–80 characters without surrounding whitespace or control characters")
+	}
+	if strings.TrimSpace(g.Description) != g.Description ||
+		utf8.RuneCountInString(g.Description) > 300 ||
+		strings.ContainsAny(g.Description, "\r\n\x00") {
+		return fmt.Errorf("group description must have at most 300 characters without newlines")
+	}
+	return nil
 }
 
 type RoutingRuleOption struct {
@@ -44,29 +71,17 @@ func (r Routing) Rules() ([]RoutingRule, error) {
 	if err := r.Validate(); err != nil {
 		return nil, err
 	}
-
-	rules := make([]RoutingRule, 0, len(r.ProxyDomains)+len(r.ProxyIPs))
-	for _, raw := range r.ProxyDomains {
-		rule, err := parseStoredRoutingRule(raw, true)
-		if err != nil {
-			return nil, err
-		}
-		rule.Note = strings.TrimSpace(r.Notes[raw])
-		rules = append(rules, rule)
-	}
-	for _, raw := range r.ProxyIPs {
-		rule, err := parseStoredRoutingRule(raw, false)
-		if err != nil {
-			return nil, err
-		}
-		rule.Note = strings.TrimSpace(r.Notes[raw])
-		rules = append(rules, rule)
-	}
-	return rules, nil
+	return r.RulesUnchecked()
 }
 
+// RoutingFromRules preserves the original ungrouped caller contract.
 func RoutingFromRules(rules []RoutingRule) (Routing, error) {
-	out := Routing{Version: Version, Notes: make(map[string]string)}
+	return RoutingFromRulesWithGroups(rules, nil)
+}
+
+func RoutingFromRulesWithGroups(rules []RoutingRule, groups []RoutingGroup) (Routing, error) {
+	out := Routing{Version: Version, Notes: make(map[string]string),
+		RuleGroups: make(map[string]string), Groups: append([]RoutingGroup(nil), groups...)}
 	seen := make(map[string]struct{}, len(rules))
 
 	for i, rule := range rules {
@@ -87,7 +102,9 @@ func RoutingFromRules(rules []RoutingRule) (Routing, error) {
 		if note != "" {
 			out.Notes[stored] = note
 		}
-
+		if rule.Group != "" {
+			out.RuleGroups[stored] = rule.Group
+		}
 		if domainRule {
 			out.ProxyDomains = append(out.ProxyDomains, stored)
 		} else {
@@ -96,6 +113,12 @@ func RoutingFromRules(rules []RoutingRule) (Routing, error) {
 	}
 	if len(out.Notes) == 0 {
 		out.Notes = nil
+	}
+	if len(out.RuleGroups) == 0 {
+		out.RuleGroups = nil
+	}
+	if err := out.Validate(); err != nil {
+		return Routing{}, err
 	}
 	return out, nil
 }

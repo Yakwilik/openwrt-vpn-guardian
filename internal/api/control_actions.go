@@ -75,7 +75,11 @@ func executeControlAction(req controlRequest) (string, error) {
 		_ = exec.Command(paths.WatchdogServiceInit, "restart").Run()
 		return "", nil
 	case "routing":
-		routing, err := config.RoutingFromRules(req.Rules)
+		_, previous, err := config.Load()
+		if err != nil {
+			return "", err
+		}
+		routing, err := routingFromRequest(req.Rules, req.Groups, previous)
 		if err != nil {
 			return "", err
 		}
@@ -96,6 +100,30 @@ func executeControlAction(req controlRequest) (string, error) {
 	default:
 		return "", fmt.Errorf("unknown action %q", req.Action)
 	}
+}
+
+// routingFromRequest accepts both the grouped UI payload and older clients
+// that only send rules. Legacy requests retain group metadata for unchanged
+// entries rather than silently dropping it.
+func routingFromRequest(rules []config.RoutingRule, groups *[]config.RoutingGroup, previous config.Routing) (config.Routing, error) {
+	if groups != nil {
+		return config.RoutingFromRulesWithGroups(rules, *groups)
+	}
+	oldRules, err := previous.Rules()
+	if err != nil {
+		return config.Routing{}, err
+	}
+	membership := make(map[string]string, len(oldRules))
+	for _, rule := range oldRules {
+		membership[string(rule.Type)+"\x00"+rule.Value] = rule.Group
+	}
+	preserved := append([]config.RoutingRule(nil), rules...)
+	for i := range preserved {
+		if preserved[i].Group == "" {
+			preserved[i].Group = membership[string(preserved[i].Type)+"\x00"+preserved[i].Value]
+		}
+	}
+	return config.RoutingFromRulesWithGroups(preserved, previous.Groups)
 }
 
 func activeSubscriptionMatches(id int) bool {

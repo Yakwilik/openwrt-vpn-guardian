@@ -126,6 +126,13 @@ export interface RoutingRule {
   type: "geosite" | "domain" | "full" | "regexp" | "ip" | "geoip";
   value: string;
   note?: string;
+  group?: string;
+}
+
+export interface RoutingGroup {
+  id: string;
+  name: string;
+  description?: string;
 }
 
 export interface RoutingRuleOption {
@@ -135,6 +142,7 @@ export interface RoutingRuleOption {
 
 export interface RoutingState {
   rules: RoutingRule[];
+  groups: RoutingGroup[];
   options: RoutingRuleOption[];
 }
 
@@ -169,5 +177,5 @@ export interface ControlResponse {
 
 export type ControlPayload = Record<
   string,
-  string | number | boolean | string[] | RoutingRule[] | undefined
+  string | number | boolean | string[] | RoutingRule[] | RoutingGroup[] | undefined
 >;

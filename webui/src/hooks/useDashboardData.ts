@@ -1,11 +1,17 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchControl, fetchHistory, fetchStatus } from "../api";
 import type { ControlResponse, HistoryResponse, StatusSnapshot } from "../types";
 
 export function useDashboardData() {
   const [status, setStatus] = useState<StatusSnapshot>();
   const [history, setHistory] = useState<HistoryResponse>();
-  const [control, setControl] = useState<ControlResponse>();
+  const [control, setControlState] = useState<ControlResponse>();
+  // A GET started before a successful POST must never roll its result back.
+  const controlGeneration = useRef(0);
+  const setControl = useCallback((value: ControlResponse) => {
+    controlGeneration.current += 1;
+    setControlState(value);
+  }, []);
   const [lastRefresh, setLastRefresh] = useState<number>();
   const [error, setError] = useState("");
 
@@ -30,12 +36,17 @@ export function useDashboardData() {
   }, []);
 
   const loadControl = useCallback(async () => {
+    const generation = ++controlGeneration.current;
     try {
       const value = await fetchControl();
-      setControl(value);
-      setError("");
+      if (generation === controlGeneration.current) {
+        setControlState(value);
+        setError("");
+      }
     } catch (err) {
-      setError(errorMessage(err));
+      if (generation === controlGeneration.current) {
+        setError(errorMessage(err));
+      }
     }
   }, []);
 

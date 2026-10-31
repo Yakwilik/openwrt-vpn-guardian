@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -850,6 +851,11 @@ func ApplyRouting(r config.Routing) error {
 	if err := json.Unmarshal(oldRouting, &oldRules); err != nil {
 		return err
 	}
+	// Group names, descriptions and memberships are metadata. Updating them
+	// must neither restart vpn-front nor modify DNS selectors or routes.
+	if sameRoutingDataplane(oldRules, r) {
+		return config.SaveRouting(r)
+	}
 	oldSelectors, err := dnsSelectors(s, oldRules)
 	if err != nil {
 		return err
@@ -918,6 +924,12 @@ func ApplyRouting(r config.Routing) error {
 		return rollback(err)
 	}
 	return nil
+}
+
+// Group metadata and notes are not consumed by vpn-front or the DNS matcher.
+func sameRoutingDataplane(previous, next config.Routing) bool {
+	return slices.Equal(previous.ProxyDomains, next.ProxyDomains) &&
+		slices.Equal(previous.ProxyIPs, next.ProxyIPs)
 }
 
 // ApplyDNS updates only LAN client DNS policy. Router-originated DNS remains

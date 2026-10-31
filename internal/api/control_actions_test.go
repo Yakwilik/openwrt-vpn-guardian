@@ -83,3 +83,56 @@ func TestDNSControlJSONContract(t *testing.T) {
 		t.Fatalf("encoded DNS response = %#v", response.DNS)
 	}
 }
+
+func TestRoutingGroupedControlPayloadAndReadback(t *testing.T) {
+	previous := config.Routing{Version: config.Version,
+		ProxyDomains: []string{"geosite:telegram"},
+	}
+	requestJSON := []byte(`{"action":"routing","rules":[{"type":"geosite","value":"telegram","group":"telegram"},{"type":"ip","value":"91.108.8.0/22","group":"telegram"}],"groups":[{"id":"telegram","name":"Telegram","description":"Домены и IP Telegram"},{"id":"future","name":"Пустая группа"}]}`)
+	var req controlRequest
+	if err := json.Unmarshal(requestJSON, &req); err != nil {
+		t.Fatal(err)
+	}
+	if req.Groups == nil || len(*req.Groups) != 2 {
+		t.Fatalf("grouped payload was not decoded: %#v", req.Groups)
+	}
+	routing, err := routingFromRequest(req.Rules, req.Groups, previous)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := makeRoutingResponse(routing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Groups) != 2 || len(response.Rules) != 2 ||
+		response.Rules[1].Group != "telegram" {
+		t.Fatalf("grouped response changed after save/readback: %#v", response)
+	}
+}
+
+func TestRoutingLegacyControlPayloadRetainsExistingMembership(t *testing.T) {
+	previous, err := config.RoutingFromRulesWithGroups(
+		[]config.RoutingRule{{Type: "domain", Value: "example.com", Group: "tools"}},
+		[]config.RoutingGroup{{ID: "tools", Name: "Tools"}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, err := routingFromRequest([]config.RoutingRule{
+		{Type: "domain", Value: "example.com", Note: "Updated"},
+		{Type: "domain", Value: "new.example.com"},
+	}, nil, previous)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rules, err := next.Rules()
+	if err != nil || rules[0].Group != "tools" || rules[1].Group != "" || len(next.Groups) != 1 {
+		t.Fatalf("old client dropped group metadata: %#v, %v", next, err)
+	}
+	noGroups := []config.RoutingGroup{}
+	withoutGroups, err := routingFromRequest(
+		[]config.RoutingRule{{Type: "domain", Value: "example.com"}}, &noGroups, previous)
+	if err != nil || len(withoutGroups.Groups) != 0 {
+		t.Fatalf("explicitly clearing groups did not work: %#v, %v", withoutGroups, err)
+	}
+}

@@ -14,7 +14,7 @@ import { SubscriptionsPanel } from "./components/SubscriptionsPanel";
 import { TrafficPath } from "./components/TrafficPath";
 import { useControlActions } from "./hooks/useControlActions";
 import { useDashboardData } from "./hooks/useDashboardData";
-import type { DNSMode, NodeInfo, RoutingRule, SubscriptionInfo } from "./types";
+import type { DNSMode, NodeInfo, RoutingGroup, RoutingRule, RoutingState, SubscriptionInfo } from "./types";
 
 interface ConfirmState {
   title: string;
@@ -170,12 +170,13 @@ export default function App() {
     );
   }
 
-  async function updateRouting(rules: RoutingRule[]) {
-    await actions.controlAction(
+  async function updateRouting(rules: RoutingRule[], groups: RoutingGroup[]): Promise<RoutingState | undefined> {
+    const updated = await actions.controlAction(
       "routing",
-      { rules },
-      "Routing обновлён",
+      { rules, groups },
+      "Routing сохранён",
     );
+    return updated?.routing;
   }
 
   async function updateDNS(mode: DNSMode, resolvers: string[], onlyProxyDomains: boolean) {
