@@ -4,6 +4,8 @@
     "geosite:openai",
     "geosite:anthropic",
     "geosite:google-gemini",
+    "domain:notebook.google.com",
+    "domain:notebook.google",
     "geosite:github",
     "geosite:youtube",
     "geosite:telegram",
@@ -33,6 +35,8 @@
     "domain:descript.com": "Descript: веб-приложение, API, авторизация, транскрипция и first-party CDN",
     "domain:descriptusercontent.com": "Descript: пользовательские медиа, файлы и assets",
     "domain:heygen.com": "HeyGen: веб-приложение, API и first-party сервисы",
-    "domain:heygen.ai": "HeyGen: сгенерированные видео и media/CDN (files2, resource2)"
+    "domain:heygen.ai": "HeyGen: сгенерированные видео и media/CDN (files2, resource2)",
+    "domain:notebook.google.com": "Gemini Notebook — основное веб-приложение",
+    "domain:notebook.google": "Gemini Notebook — сайт и переходы"
   }
 }
