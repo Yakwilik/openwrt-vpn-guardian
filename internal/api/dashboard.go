@@ -51,6 +51,11 @@ func (h *dashboardHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
 			_, _ = w.Write(h.index)
 		}
+	case r.URL.Path == "/favicon.svg":
+		// The icon is a Vite public asset, not an /assets/ bundle entry.
+		// Serve only this known root-level file rather than exposing all of dist.
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		h.files.ServeHTTP(w, r)
 	case strings.HasPrefix(r.URL.Path, "/assets/"):
 		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 		h.files.ServeHTTP(w, r)

@@ -40,6 +40,23 @@ func TestDashboardHandlerServesBundle(t *testing.T) {
 	if asset.Body.Len() == 0 {
 		t.Fatal("embedded JavaScript asset is empty")
 	}
+
+	if !strings.Contains(index.Body.String(), "href=\"/favicon.svg\"") {
+		t.Fatal("dashboard has no favicon link")
+	}
+	favicon := requestDashboard(t, handler, http.MethodGet, "/favicon.svg")
+	if favicon.Code != http.StatusOK {
+		t.Fatalf("GET /favicon.svg status = %d, want 200", favicon.Code)
+	}
+	if got := favicon.Header().Get("Content-Type"); !strings.Contains(got, "image/svg+xml") {
+		t.Fatalf("favicon Content-Type = %q", got)
+	}
+	if !strings.Contains(favicon.Body.String(), "<svg") {
+		t.Fatal("favicon is not SVG markup")
+	}
+	if got := requestDashboard(t, handler, http.MethodHead, "/favicon.svg"); got.Code != http.StatusOK || got.Body.Len() != 0 {
+		t.Fatalf("HEAD favicon status = %d, body length = %d", got.Code, got.Body.Len())
+	}
 }
 
 func TestDashboardHandlerRejectsUnknownPathAndMethod(t *testing.T) {
