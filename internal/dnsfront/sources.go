@@ -26,8 +26,8 @@ const BootstrapStatic = "/etc/vpn-guardian/bootstrap-resolv.static"
 const BootstrapResolv = "/tmp/vpn-guardian-resolv.conf"
 const BootstrapHotplug = "/etc/hotplug.d/iface/98-vpn-guardian-dns-bootstrap"
 
-// Sources are captured before replacing dnsmasq's default upstream. The WAN
-// resolver file remains owned and refreshed by netifd, not by Guardian.
+// Sources describes native DNS server settings at the last successful apply.
+// WAN DHCP keeps the resolver file current, independently of Guardian.
 type Sources struct {
 	Servers    []string `json:"servers"`
 	ResolvFile string   `json:"resolvFile"`
@@ -36,6 +36,28 @@ type Sources struct {
 type Option struct {
 	Present bool     `json:"present"`
 	Values  []string `json:"values,omitempty"`
+}
+
+// sourcesFromOptions uses the router's current native resolver configuration.
+// A missing explicit resolver file means netifd's WAN DNS (not /tmp/resolv.conf).
+func sourcesFromOptions(options map[string]Option) Sources {
+	var s Sources
+	for _, server := range options["server"].Values {
+		if !strings.HasPrefix(server, "/") {
+			s.Servers = append(s.Servers, server)
+		}
+	}
+	if noResolv := options["noresolv"]; noResolv.Present &&
+		strings.TrimSpace(strings.Join(noResolv.Values, "")) == "1" {
+		return s
+	}
+	if resolvFile := options["resolvfile"]; resolvFile.Present {
+		s.ResolvFile = strings.TrimSpace(strings.Join(resolvFile.Values, ""))
+	}
+	if s.ResolvFile == "" {
+		s.ResolvFile = WANResolvFile
+	}
+	return s
 }
 
 type State struct {

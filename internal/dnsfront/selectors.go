@@ -191,7 +191,7 @@ func UpdateSelectors(port int, selectors []byte) error {
 	if err != nil {
 		return err
 	}
-	if err := validateSelectorZones(port, selectors, guards, s.Options["server"].Values); err != nil {
+	if err := validateSelectorZones(port, selectors, guards, option(s.Section, "server").Values); err != nil {
 		return err
 	}
 	reload, err := selectorReloadAction(s, port)

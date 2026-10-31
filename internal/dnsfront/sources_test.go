@@ -26,11 +26,13 @@ func TestEndpointsRejectRecursiveAndNonnumericUpstreams(t *testing.T) {
 	}
 }
 
-func TestNativeOptionsRestoreDirectSourcesAndMountSelectorDirectory(t *testing.T) {
-	s := State{Sources: Sources{Servers: []string{"1.1.1.1", "127.0.0.1#20176", "192.168.8.1", "9.9.9.9#5353"}, ResolvFile: WANResolvFile}, Options: map[string]Option{
-		"server": {Present: true, Values: []string{"1.1.1.1", "/corp.home/192.168.1.254", "/lan/"}},
-	}}
+func TestNativeOptionsPreserveCurrentDirectSourcesAndMountSelectorDirectory(t *testing.T) {
+	// A stale snapshot must never replace native upstreams selected later by
+	// the operator or by the stock OpenWrt WAN DNS mechanism.
+	s := State{Sources: Sources{Servers: []string{"9.9.9.9", "149.112.112.112"}}}
 	current := map[string]Option{
+		"server":        {Present: true, Values: []string{"1.1.1.1", "/corp.home/192.168.1.254", "/lan/"}},
+		"resolvfile":    {Present: true, Values: []string{WANResolvFile}},
 		"extraconftext": {Present: true, Values: []string{"cache-size=1000\nconf-file=" + LocalConfigPath}},
 		"addnmount":     {Present: true, Values: []string{"/etc/custom-dns", LocalConfigPath, SelectorsPath}},
 	}
@@ -39,29 +41,72 @@ func TestNativeOptionsRestoreDirectSourcesAndMountSelectorDirectory(t *testing.T
 		t.Fatal(err)
 	}
 	servers := strings.Join(opts["server"].Values, ",")
-	if servers != "/corp.home/192.168.1.254,/lan/,1.1.1.1,9.9.9.9#5353" {
-		t.Fatalf("native sources were changed or still point at Guardian: %s", servers)
+	if servers != "1.1.1.1,/corp.home/192.168.1.254,/lan/" {
+		t.Fatalf("native DNS was replaced with a stale source: %s", servers)
 	}
-	if opts["noresolv"].Present || !opts["resolvfile"].Present || opts["resolvfile"].Values[0] != WANResolvFile {
-		t.Fatalf("native WAN polling was not restored: %v", opts)
+	if opts["noresolv"].Present || !opts["resolvfile"].Present ||
+		opts["resolvfile"].Values[0] != WANResolvFile {
+		t.Fatalf("WAN DNS polling was disabled: %v", opts)
 	}
 	if mounts := strings.Join(opts["addnmount"].Values, ","); mounts != "/etc/custom-dns,"+LocalConfigPath+","+SelectorsDir {
-		t.Fatalf("atomic selector replacements are not visible in ujail: %s", mounts)
+		t.Fatalf("selector directory mounts were changed: %s", mounts)
 	}
 	extra := strings.Join(opts["extraconftext"].Values, "\n")
-	if !strings.Contains(extra, "cache-size=1000") || strings.Count(extra, "conf-file="+LocalConfigPath) != 1 || !strings.Contains(extra, "servers-file="+SelectorsPath) {
+	if !strings.Contains(extra, "cache-size=1000") || strings.Count(extra, "conf-file="+LocalConfigPath) != 1 ||
+		!strings.Contains(extra, "servers-file="+SelectorsPath) {
 		t.Fatalf("native includes damaged unrelated settings: %s", extra)
+	}
+	active := sourcesFromOptions(opts)
+	if strings.Join(active.Servers, ",") != "1.1.1.1" || active.ResolvFile != WANResolvFile {
+		t.Fatalf("system resolver source did not follow native settings: %+v", active)
 	}
 }
 
 func TestNativeOptionsRespectExplicitNoResolv(t *testing.T) {
-	s := State{Sources: Sources{Servers: []string{"9.9.9.9"}}, Options: map[string]Option{}}
-	opts, err := nativeOptions(s, nil, nil)
-	if err != nil || !opts["noresolv"].Present || opts["resolvfile"].Present {
-		t.Fatalf("explicit static-only DNS was replaced by WAN DNS: %v %v", opts, err)
+	s := State{Sources: Sources{Servers: []string{"1.1.1.1"}, ResolvFile: WANResolvFile}}
+	current := map[string]Option{
+		"server":   {Present: true, Values: []string{"9.9.9.9"}},
+		"noresolv": {Present: true, Values: []string{"1"}},
 	}
-	if !strings.Contains(bootstrapScriptFor(s.Sources), "wan='/dev/null'") {
+	opts, err := nativeOptions(s, current, nil)
+	if err != nil || !opts["noresolv"].Present || opts["resolvfile"].Present ||
+		strings.Join(opts["server"].Values, ",") != "9.9.9.9" {
+		t.Fatalf("native static-only DNS was replaced by saved sources: %v %v", opts, err)
+	}
+	if !strings.Contains(bootstrapScriptFor(sourcesFromOptions(opts)), "wan='/dev/null'") {
 		t.Fatal("router bootstrap re-enabled a deliberately disabled WAN source")
+	}
+}
+
+func TestNativeOptionsImplicitWANUsesNetifdNotRecursiveResolvConf(t *testing.T) {
+	s := State{Sources: Sources{Servers: []string{"9.9.9.9", "149.112.112.112"}}}
+	// The stock dnsmasq setup needs no static servers or explicit resolvfile.
+	opts, err := nativeOptions(s, map[string]Option{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts["server"].Present || opts["noresolv"].Present || !opts["resolvfile"].Present ||
+		opts["resolvfile"].Values[0] != WANResolvFile {
+		t.Fatalf("WAN DHCP resolver was not retained: %+v", opts)
+	}
+	current := sourcesFromOptions(opts)
+	if len(current.Servers) != 0 || current.ResolvFile != WANResolvFile {
+		t.Fatalf("stale static upstreams leaked into default DNS: %+v", current)
+	}
+}
+
+func TestNativeOptionsRejectUnsafeDirectUpstreams(t *testing.T) {
+	for _, original := range []map[string]Option{
+		{"server": {Present: true, Values: []string{"127.0.0.1#20176"}}},
+		{"server": {Present: true, Values: []string{"192.168.8.1"}}},
+		{"server": {Present: true, Values: []string{"/example.com/127.0.0.1#20176"}}},
+		{"resolvfile": {Present: true, Values: []string{"/tmp/resolv.conf"}}},
+		{"server": {Present: true, Values: []string{"not-a-dns-ip"}}},
+	} {
+		_, err := nativeOptions(State{}, original, []netip.Addr{netip.MustParseAddr("192.168.8.1")})
+		if err == nil {
+			t.Errorf("accepted recursive or unsafe upstream: %+v", original)
+		}
 	}
 }
 

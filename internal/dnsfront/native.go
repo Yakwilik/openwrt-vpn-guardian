@@ -18,34 +18,29 @@ func isManagedInclude(line string) bool {
 	return line == "conf-file="+LocalConfigPath || line == "servers-file="+SelectorsPath
 }
 
-func nativeOptions(s State, current map[string]Option, own []netip.Addr) (map[string]Option, error) {
-	servers, err := keepLocalServers(s.Options["server"].Values)
-	if err != nil {
+// nativeOptions preserves the router's current upstream policy. Guardian owns
+// local-zone selectors, not DNS servers obtained through WAN DHCP or set by
+// the operator in OpenWrt. A missing resolvfile uses netifd's WAN DNS file,
+// never the router's own /tmp/resolv.conf (which can point at dnsmasq).
+func nativeOptions(_ State, current map[string]Option, own []netip.Addr) (map[string]Option, error) {
+	if _, err := keepLocalServers(current["server"].Values); err != nil {
 		return nil, err
 	}
-	seen := map[string]bool{}
-	for _, raw := range s.Sources.Servers {
-		endpoint, err := Endpoint(raw, own)
-		if err != nil || seen[endpoint] {
-			continue // Never restore the old loopback dispatcher as a default.
+	source := sourcesFromOptions(current)
+	for _, raw := range source.Servers {
+		if _, err := Endpoint(raw, own); err != nil {
+			return nil, fmt.Errorf("invalid system DNS upstream %q: %w", raw, err)
 		}
-		seen[endpoint] = true
-		host, port, err := net.SplitHostPort(endpoint)
-		if err != nil {
-			return nil, err
-		}
-		if port != "53" {
-			host += "#" + port
-		}
-		servers = append(servers, host)
 	}
-	resolvFile := s.Sources.ResolvFile
-	if resolvFile != "" && (!filepath.IsAbs(resolvFile) || strings.ContainsAny(resolvFile, "\r\n\x00") || resolvFile == "/etc/resolv.conf" || resolvFile == "/tmp/resolv.conf") {
-		return nil, fmt.Errorf("unsafe native DNS resolver file %q", resolvFile)
+	if source.ResolvFile != "" && (!filepath.IsAbs(source.ResolvFile) ||
+		strings.ContainsAny(source.ResolvFile, "\r\n\x00") ||
+		source.ResolvFile == "/etc/resolv.conf" || source.ResolvFile == "/tmp/resolv.conf") {
+		return nil, fmt.Errorf("unsafe native DNS resolver file %q", source.ResolvFile)
 	}
-	if len(seen) == 0 && resolvFile == "" {
+	if len(source.Servers) == 0 && source.ResolvFile == "" {
 		return nil, errors.New("no native system/WAN DNS source configured")
 	}
+
 	var extra []string
 	for _, line := range strings.Split(strings.Join(current["extraconftext"].Values, "\n"), "\n") {
 		if !isManagedInclude(strings.TrimSpace(line)) && strings.TrimSpace(line) != "" {
@@ -62,10 +57,15 @@ func nativeOptions(s State, current map[string]Option, own []netip.Addr) (map[st
 		}
 	}
 	mounts = append(mounts, LocalConfigPath, SelectorsDir)
+
+	resolvFile := current["resolvfile"]
+	if source.ResolvFile != "" && !resolvFile.Present {
+		resolvFile = Option{Present: true, Values: []string{source.ResolvFile}}
+	}
 	return map[string]Option{
-		"server":        {Present: len(servers) != 0, Values: servers},
-		"noresolv":      {Present: resolvFile == "", Values: []string{"1"}},
-		"resolvfile":    {Present: resolvFile != "", Values: []string{resolvFile}},
+		"server":        current["server"],
+		"noresolv":      current["noresolv"],
+		"resolvfile":    resolvFile,
 		"localuse":      {Present: true, Values: []string{"0"}},
 		"extraconftext": {Present: true, Values: []string{strings.Join(extra, "\n")}},
 		"addnmount":     {Present: true, Values: mounts},
@@ -81,8 +81,8 @@ func sameNativeOptions(a, b map[string]Option) bool {
 	return true
 }
 
-// Configure installs native dnsmasq split DNS. It restores ordinary upstreams
-// and delegates only the supplied domain selectors to Guardian. Runtime changes
+// Configure installs native dnsmasq split DNS without overwriting the
+// router's system/WAN upstreams. Runtime changes
 // use UpdateSelectors with synchronous acknowledgement where supported.
 func Configure(port int, selectors []byte) error {
 	if err := validateSelectorSyntax(port, selectors); err != nil {
@@ -101,7 +101,7 @@ func Configure(port int, selectors []byte) error {
 		return err
 	}
 	guards := RenderGuards(string(configuration) + "\n" + string(before.LocalConfig))
-	if err := validateSelectorZones(port, selectors, guards, s.Options["server"].Values); err != nil {
+	if err := validateSelectorZones(port, selectors, guards, before.Options["server"].Values); err != nil {
 		return err
 	}
 	options, err := nativeOptions(s, before.Options, OwnAddresses())
@@ -109,11 +109,21 @@ func Configure(port int, selectors []byte) error {
 		return err
 	}
 	wiringReady := checkNativeWiring(s, port) == nil && bytes.Equal(before.LocalConfig, guards) && sameNativeOptions(before.Options, options)
+	previousState := s
 	rollback := func(cause error) error {
+		if err := saveState(previousState); err != nil {
+			cause = errors.Join(cause, fmt.Errorf("restore previous DNS state: %w", err))
+		}
 		if err := RestoreCheckpoint(before); err != nil {
 			return errors.Join(cause, fmt.Errorf("restore previous DNS integration: %w", err))
 		}
 		return cause
+	}
+	// Current native settings, never the installation-time snapshot, determine
+	// direct DNS and the system resolver used by Guardian itself.
+	s.Sources = sourcesFromOptions(options)
+	if err := saveState(s); err != nil {
+		return rollback(err)
 	}
 	// Managed bootstrap files must converge even when all dnsmasq wiring is
 	// already correct; an old script must not survive the idempotent fast path.
@@ -121,7 +131,10 @@ func Configure(port int, selectors []byte) error {
 		return rollback(err)
 	}
 	if wiringReady {
-		return UpdateSelectors(port, selectors)
+		if err := UpdateSelectors(port, selectors); err != nil {
+			return rollback(err)
+		}
+		return nil
 	}
 	if err := os.MkdirAll(SelectorsDir, 0755); err != nil {
 		return rollback(err)
@@ -381,7 +394,7 @@ func checkNativeWiring(s State, port int) error {
 	if err != nil {
 		return err
 	}
-	return validateSelectorZones(port, selectors, guards, s.Options["server"].Values)
+	return validateSelectorZones(port, selectors, guards, option(s.Section, "server").Values)
 }
 
 // Check validates active native dispatch, not merely the presence of our files.
