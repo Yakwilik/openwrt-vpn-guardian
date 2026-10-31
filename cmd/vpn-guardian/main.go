@@ -63,7 +63,7 @@ func run(args []string) error {
 		return api.Serve(commandArgs)
 	case "api-key":
 		return api.RunAPIKey(commandArgs)
-	case "bootstrap", "init", "status", "validate", "apply", "backup", "restore", "cleanup":
+	case "bootstrap", "init", "status", "validate", "apply", "backup", "restore", "cleanup", "quic-mode":
 		return stack.Run(args)
 	default:
 		return fmt.Errorf("unknown command %q", command)
@@ -78,6 +78,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  vpn-guardian init [--non-interactive] [--dry-run]")
 	fmt.Fprintln(os.Stderr, "  vpn-guardian status|validate|apply|backup|restore <archive>")
 	fmt.Fprintln(os.Stderr, "  vpn-guardian cleanup")
+	fmt.Fprintln(os.Stderr, "  vpn-guardian quic-mode allow|tcp-fallback")
 	fmt.Fprintln(os.Stderr, "  vpn-guardian selftest")
 	fmt.Fprintln(os.Stderr, "  vpn-guardian watchdog [flags]")
 	fmt.Fprintln(os.Stderr, "  vpn-guardian control [flags]")

@@ -89,6 +89,7 @@ type HealthBrief struct {
 }
 
 type Status struct {
+	QUICMode            string                 `json:"quic_mode"`
 	DNSHealthy          bool                   `json:"dns_healthy"`
 	DNSOnlyProxyDomains bool                   `json:"dns_only_proxy_domains"`
 	DNSChecks           map[string]DNSCheck    `json:"dns_checks"`
@@ -250,6 +251,10 @@ func collectSnapshot(rt *runtimeState) (Status, error) {
 		Collector:   serviceState("vpn-dashboard-collector"),
 		Diagnostics: serviceState("vpn-guardian-diagnostics"),
 		API:         serviceState("vpn-guardian-api"),
+	}
+	out.QUICMode = stack.Front.QUICMode
+	if out.QUICMode == "" {
+		out.QUICMode = "allow"
 	}
 	out.DNSMode = stack.DNS.Mode
 	out.DNSFrontend = "dnsmasq"

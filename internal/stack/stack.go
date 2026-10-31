@@ -63,6 +63,9 @@ func Run(args []string) error {
 	case "bootstrap", "init":
 		return setupCmd(command, commandArgs)
 
+	case "quic-mode":
+		return configureQUIC(commandArgs)
+
 	case "status":
 		if err := requireNoArgs(command, commandArgs); err != nil {
 			return err
@@ -551,6 +554,7 @@ func makeNFT(s Stack) string {
 		b.WriteString(x)
 	}
 	b.WriteString(" }\n  }\n")
+	writeQUICRejectChains(&b, s)
 	// DNS clients always reach native dnsmasq, never the Guardian upstream.
 	// Client DNS belongs to the configured LAN only. Management/WAN peers must
 	// use their own resolver and local records; an accidental fw4 allow rule
@@ -579,6 +583,12 @@ func makeNFT(s Stack) string {
 	b.WriteString("    type filter hook prerouting priority mangle - 10; policy accept;\n")
 	fmt.Fprintf(&b, "    iifname %q ip saddr %s ct status dnat return\n", s.LANInterface, s.LANCIDR)
 	fmt.Fprintf(&b, "    iifname %q ip saddr %s ip daddr @bypass4 return\n", s.LANInterface, s.LANCIDR)
+	if s.Front.QUICMode == "tcp-fallback" {
+		// REJECT is not valid in prerouting. Exempt UDP/443 from TPROXY,
+		// remove only our mark bits, then reject in input/forward below.
+		// This also handles already-marked UDP conntrack entries on hot reload.
+		fmt.Fprintf(&b, "    iifname %q ip saddr %s udp dport 443 meta mark set meta mark & 0x%x ct mark set ct mark & 0x%x return\n", s.LANInterface, s.LANCIDR, ^uint32(s.Front.Mark), ^uint32(s.Front.Mark))
+	}
 	fmt.Fprintf(&b, "    iifname %q ip saddr %s meta nfproto ipv4 meta l4proto { tcp, udp } meta mark set 0x%x ct mark set meta mark tproxy ip to 127.0.0.1:%d accept\n", s.LANInterface, s.LANCIDR, s.Front.Mark, s.Front.TProxyPort)
 	// A missing transparent socket must not fall through to ordinary WAN
 	// forwarding or an unrelated HTTP listener on the router.

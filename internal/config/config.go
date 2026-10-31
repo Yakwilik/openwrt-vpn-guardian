@@ -33,12 +33,14 @@ type Stack struct {
 }
 
 type Front struct {
-	SocksPort        int `json:"socksPort"`
-	TProxyPort       int `json:"tproxyPort"`
-	PolicyPort       int `json:"policyPort"`
-	Mark             int `json:"mark"`
-	RouteTable       int `json:"routeTable"`
-	DirectSocketMark int `json:"directSocketMark"`
+	// QUICMode is opt-in: legacy manifests retain UDP forwarding.
+	QUICMode         string `json:"quicMode,omitempty"`
+	SocksPort        int    `json:"socksPort"`
+	TProxyPort       int    `json:"tproxyPort"`
+	PolicyPort       int    `json:"policyPort"`
+	Mark             int    `json:"mark"`
+	RouteTable       int    `json:"routeTable"`
+	DirectSocketMark int    `json:"directSocketMark"`
 }
 
 type Backend struct {
@@ -374,6 +376,10 @@ func (s Stack) Validate() error {
 	}
 	if err := s.Selection.Validate(); err != nil {
 		return err
+	}
+
+	if s.Front.QUICMode != "" && s.Front.QUICMode != "allow" && s.Front.QUICMode != "tcp-fallback" {
+		return fmt.Errorf("invalid front.quicMode %q", s.Front.QUICMode)
 	}
 
 	if err := validatePort("front.socksPort", s.Front.SocksPort); err != nil {

@@ -27,6 +27,7 @@ const (
 )
 
 type healthStatus struct {
+	QUICMode      string            `json:"quic_mode,omitempty"`
 	Now           int64             `json:"now"`
 	Overall       string            `json:"overall"`
 	Node          string            `json:"node"`
