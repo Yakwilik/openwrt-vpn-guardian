@@ -1628,3 +1628,104 @@ button:disabled {
     flex-direction: column;
   }
 }
+
+/* QUIC mode and persistent Xray diagnostics */
+.quic-settings {
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) minmax(210px, 0.8fr);
+  gap: 10px;
+  margin-top: 13px;
+}
+
+.quic-settings .control-group {
+  min-width: 0;
+  margin: 0;
+}
+
+.quic-mode-selector {
+  margin: 11px 0 10px;
+  display: flex;
+  width: 100%;
+}
+
+.quic-mode-selector button {
+  flex: 1;
+  min-width: 0;
+}
+
+.quic-log-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  border-top: 1px solid var(--border-soft);
+  margin-top: 15px;
+  padding-top: 12px;
+}
+
+.quic-log-heading > div {
+  display: grid;
+  gap: 4px;
+}
+
+.quic-log-heading strong {
+  font-size: 13px;
+}
+
+.quic-event-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 11px;
+}
+
+.quic-event {
+  border: 1px solid var(--border-soft);
+  background: rgba(8, 17, 23, 0.4);
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+
+.quic-event-meta {
+  display: flex;
+  gap: 9px;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11px;
+  margin-bottom: 5px;
+  color: var(--muted);
+}
+
+.quic-error-label {
+  color: var(--danger);
+}
+
+.quic-mode-label {
+  color: var(--accent);
+}
+
+.quic-event code {
+  display: block;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--muted-strong);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.quic-warning {
+  color: var(--warn);
+  font-size: 12px;
+  margin-top: 10px;
+  line-height: 1.5;
+}
+
+.quic-log-note {
+  margin-top: 12px;
+}
+
+@media (max-width: 860px) {
+  .quic-settings {
+    grid-template-columns: 1fr;
+  }
+}

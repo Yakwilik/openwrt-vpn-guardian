@@ -47,6 +47,7 @@ type controlRequest struct {
 	Transports          []config.Transport     `json:"transports,omitempty"`
 	Rules               []config.RoutingRule   `json:"rules,omitempty"`
 	Groups              *[]config.RoutingGroup `json:"groups,omitempty"`
+	QUICMode            string                 `json:"quicMode,omitempty"`
 	DNSMode             string                 `json:"dnsMode,omitempty"`
 	DNSOnlyProxyDomains *bool                  `json:"dnsOnlyProxyDomains,omitempty"`
 	DNSResolvers        []string               `json:"dnsResolvers,omitempty"`

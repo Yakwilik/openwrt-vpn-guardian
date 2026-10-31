@@ -38,6 +38,7 @@ func Serve(args []string) error {
 	mux.HandleFunc("/healthz", handleHealthz)
 	mux.HandleFunc("/api/status", handleHTTPStatus)
 	mux.HandleFunc("/api/history", handleHTTPHistory)
+	mux.HandleFunc("/api/quic", handleQUICHTTP)
 	mux.HandleFunc("/api/control", HandleControlHTTP)
 	mux.Handle("/", dashboard)
 

@@ -39,6 +39,7 @@ export interface StatusSnapshot {
  dns_only_proxy_domains: boolean;
  dns_checks: Record<string, {name: string; ok: boolean; rcode: string; ms: number; error?: string}>;
   dns_intercept: boolean;
+  quic_mode?: "allow" | "tcp-fallback";
   fallback_direct: boolean;
   failures: number;
   last_switch: number;
@@ -144,6 +145,24 @@ export interface RoutingState {
   rules: RoutingRule[];
   groups: RoutingGroup[];
   options: RoutingRuleOption[];
+}
+
+export type QUICMode = "allow" | "tcp-fallback";
+
+export interface QUICEvent {
+  ts: number;
+  kind: "error" | "mode-change";
+  message: string;
+}
+
+export interface QUICState {
+  mode: QUICMode;
+  effective: boolean;
+  firewallAvailable: boolean;
+  rejectedUDP443: number;
+  logsAvailable: boolean;
+  events: QUICEvent[];
+  updatedAt: number;
 }
 
 export type DNSMode = "system" | "custom" | "xray";

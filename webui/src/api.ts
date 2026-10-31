@@ -3,6 +3,7 @@ import type {
   ControlResponse,
   HistoryResponse,
   StatusSnapshot,
+  QUICState,
 } from "./types";
 
 async function readJSON<T>(response: Response): Promise<T> {
@@ -22,6 +23,16 @@ export async function fetchStatus(signal?: AbortSignal): Promise<StatusSnapshot>
 export async function fetchHistory(signal?: AbortSignal): Promise<HistoryResponse> {
   return readJSON<HistoryResponse>(
     await fetch("/api/history", { cache: "no-store", signal }),
+  );
+}
+
+export async function fetchQUIC(signal?: AbortSignal): Promise<QUICState> {
+  return readJSON<QUICState>(
+    await fetch("/api/quic", {
+      cache: "no-store",
+      credentials: "same-origin",
+      signal,
+    }),
   );
 }
 

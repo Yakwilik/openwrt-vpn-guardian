@@ -34,6 +34,13 @@ func writeQUICRejectChains(b *strings.Builder, s Stack) {
 	}
 }
 
+// ConfigureQUIC exposes the same validated, rollback-safe operation to the
+// authenticated management API and the CLI. Both paths hold ControlLock and
+// update only the Guardian nft table and its persisted mode.
+func ConfigureQUIC(mode string) error {
+	return configureQUIC([]string{mode})
+}
+
 // configureQUIC changes only our nft table and the persisted manifest. It does
 // not restart Xray, DNS, watchdog or v2rayA, nor drop existing TCP connections.
 func configureQUIC(args []string) error {
@@ -111,5 +118,8 @@ func configureQUIC(args []string) error {
 		return rollback(fmt.Errorf("activate QUIC mode: %w: %s", e, out))
 	}
 	fmt.Printf("QUIC mode=%s applied without restarting VPN/DNS; backup=%s\n", args[0], snapshot)
+	// Persist the mode change via the existing diagnostics/syslog pipeline;
+	// do not log the backup path or any browser/request metadata.
+	_ = exec.Command("logger", "-t", "vpn-guardian-control", "QUIC mode changed to "+args[0]).Run()
 	return nil
 }

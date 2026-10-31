@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { fetchControl, fetchHistory, fetchStatus } from "../api";
-import type { ControlResponse, HistoryResponse, StatusSnapshot } from "../types";
+import { fetchControl, fetchHistory, fetchQUIC, fetchStatus } from "../api";
+import type { ControlResponse, HistoryResponse, QUICState, StatusSnapshot } from "../types";
 
 export function useDashboardData() {
   const [status, setStatus] = useState<StatusSnapshot>();
   const [history, setHistory] = useState<HistoryResponse>();
+  const [quic, setQUIC] = useState<QUICState>();
+  const [quicError, setQUICError] = useState("");
+  const quicGeneration = useRef(0);
   const [control, setControlState] = useState<ControlResponse>();
   // A GET started before a successful POST must never roll its result back.
   const controlGeneration = useRef(0);
@@ -50,9 +53,23 @@ export function useDashboardData() {
     }
   }, []);
 
+  const loadQUIC = useCallback(async () => {
+    const generation = ++quicGeneration.current;
+    try {
+      const value = await fetchQUIC();
+      if (generation === quicGeneration.current) {
+        setQUIC(value);
+        setQUICError("");
+      }
+    } catch (err) {
+      if (generation === quicGeneration.current) setQUICError(errorMessage(err));
+    }
+  }, []);
+
   const refreshAll = useCallback(async () => {
     await Promise.allSettled([loadStatus(), loadHistory(), loadControl()]);
-  }, [loadControl, loadHistory, loadStatus]);
+    if (control?.authenticated) await loadQUIC();
+  }, [control?.authenticated, loadControl, loadHistory, loadQUIC, loadStatus]);
 
   useEffect(() => {
     void refreshAll();
@@ -67,9 +84,24 @@ export function useDashboardData() {
     };
   }, [loadControl, loadHistory, loadStatus, refreshAll]);
 
+  useEffect(() => {
+    if (!control?.authenticated) {
+      ++quicGeneration.current;
+      setQUIC(undefined);
+      setQUICError("");
+      return;
+    }
+    void loadQUIC();
+    const timer = window.setInterval(() => void loadQUIC(), 15_000);
+    return () => window.clearInterval(timer);
+  }, [control?.authenticated, loadQUIC]);
+
   return {
     status,
     history,
+    quic,
+    quicError,
+    loadQUIC,
     control,
     setControl,
     lastRefresh,

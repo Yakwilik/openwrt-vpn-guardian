@@ -86,6 +86,11 @@ func executeControlAction(req controlRequest) (string, error) {
 		return "", stackruntime.ApplyRouting(routing)
 	case "dns":
 		return "", stackruntime.ApplyDNS(req.DNSMode, req.DNSResolvers, req.DNSOnlyProxyDomains)
+	case "quic_mode":
+		if req.QUICMode != "allow" && req.QUICMode != "tcp-fallback" {
+			return "", errors.New("quicMode must be allow or tcp-fallback")
+		}
+		return "", stackruntime.ConfigureQUIC(req.QUICMode)
 	case "repair":
 		ready, err := v2rayautil.RepairBackendListener(true)
 		if err != nil {

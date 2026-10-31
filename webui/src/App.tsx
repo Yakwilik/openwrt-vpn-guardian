@@ -7,6 +7,7 @@ import { HeaderBar } from "./components/HeaderBar";
 import { HealthGrid } from "./components/HealthGrid";
 import { HistoryChart } from "./components/HistoryChart";
 import { NodesPanel } from "./components/NodesPanel";
+import { QUICPanel } from "./components/QUICPanel";
 import { RoutingPanel } from "./components/RoutingPanel";
 import { ServicesPanel } from "./components/ServicesPanel";
 import { StatusOverview } from "./components/StatusOverview";
@@ -14,7 +15,7 @@ import { SubscriptionsPanel } from "./components/SubscriptionsPanel";
 import { TrafficPath } from "./components/TrafficPath";
 import { useControlActions } from "./hooks/useControlActions";
 import { useDashboardData } from "./hooks/useDashboardData";
-import type { DNSMode, NodeInfo, RoutingGroup, RoutingRule, RoutingState, SubscriptionInfo } from "./types";
+import type { DNSMode, NodeInfo, QUICMode, RoutingGroup, RoutingRule, RoutingState, SubscriptionInfo } from "./types";
 
 interface ConfirmState {
   title: string;
@@ -187,6 +188,26 @@ export default function App() {
     );
   }
 
+  function changeQUICMode(mode: QUICMode) {
+    const apply = async () => {
+      const next = await actions.controlAction(
+        "quic_mode", { quicMode: mode },
+        mode === "allow" ? "QUIC разрешён" : "TCP fallback включён",
+      );
+      if (next) await dashboard.loadQUIC();
+    };
+    if (mode === "allow") {
+      ask({
+        title: "Разрешить QUIC / HTTP/3?",
+        description: "Отклонение клиентского UDP/443 будет отключено. Если проблема QUIC остаётся, страницы могут снова загружаться нестабильно. VPN и DNS не перезапускаются.",
+        confirmLabel: "Включить Allow QUIC",
+        run: apply,
+      });
+    } else {
+      void apply();
+    }
+  }
+
   function restartService(service: "v2raya") {
     ask({
       title: `Перезапустить ${service}?`,
@@ -240,6 +261,15 @@ export default function App() {
       <div className="dashboard-layout">
         <div className="dashboard-main">
           <TrafficPath status={dashboard.status} />
+          <QUICPanel
+            status={dashboard.status}
+            diagnostics={dashboard.quic}
+            error={dashboard.quicError}
+            canManage={canManage}
+            busy={actions.busy}
+            onMode={changeQUICMode}
+            onRefresh={() => void dashboard.loadQUIC()}
+          />
           <HistoryChart history={dashboard.history} />
           <NodesPanel
             control={dashboard.control}
