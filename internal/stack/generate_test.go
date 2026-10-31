@@ -32,6 +32,8 @@ func TestGenerateUsesOwnedRuntimePaths(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	mustContainFile(t, filepath.Join(dir, "vpn-guardian-diagnostics.init"), "diagnostics -mode daemon -interval 10s")
+	mustContainFile(t, filepath.Join(dir, "vpn-guardian-diagnostics.init"), "procd_set_param respawn")
 	mustContainFile(t, filepath.Join(dir, "vpn-front.init"), paths.FrontConfig)
 	mustContainFile(t, filepath.Join(dir, "vpn-front.init"), `ASSETS="/opt/xray-assets"`)
 	mustContainFile(t, filepath.Join(dir, "vpn-policy.init"), paths.PolicyConfig)

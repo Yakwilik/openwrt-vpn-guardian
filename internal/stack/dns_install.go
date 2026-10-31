@@ -223,7 +223,7 @@ func InstallDNSRuntime() error {
 	}
 	// Long-lived control and status processes otherwise keep the old matcher
 	// update and frontend-check implementations after a binary upgrade.
-	for _, init := range []string{paths.APIServiceInit, paths.CollectorServiceInit} {
+	for _, init := range []string{paths.APIServiceInit, paths.CollectorServiceInit, paths.DiagnosticsServiceInit} {
 		if serviceRunning(filepath.Base(init)) {
 			if out, err := run(init, "restart"); err != nil {
 				return rollback(fmt.Errorf("refresh %s: %w: %s", filepath.Base(init), err, out))

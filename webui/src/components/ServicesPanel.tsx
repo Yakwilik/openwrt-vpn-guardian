@@ -1,6 +1,6 @@
 import type { StatusSnapshot } from "../types";
 
-const serviceOrder = ["front", "policy", "dns", "v2raya", "watchdog", "collector", "api"];
+const serviceOrder = ["front", "policy", "dns", "v2raya", "watchdog", "collector", "diagnostics", "api"];
 
 interface ServicesPanelProps {
   status?: StatusSnapshot;

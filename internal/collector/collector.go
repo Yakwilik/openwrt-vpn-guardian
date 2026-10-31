@@ -64,13 +64,14 @@ type Control struct {
 }
 
 type ServiceStatus struct {
-	V2rayA    string `json:"v2raya"`
-	Front     string `json:"front"`
-	Policy    string `json:"policy"`
-	DNS       string `json:"dns"`
-	Watchdog  string `json:"watchdog"`
-	Collector string `json:"collector"`
-	API       string `json:"api"`
+	V2rayA      string `json:"v2raya"`
+	Front       string `json:"front"`
+	Policy      string `json:"policy"`
+	DNS         string `json:"dns"`
+	Watchdog    string `json:"watchdog"`
+	Collector   string `json:"collector"`
+	Diagnostics string `json:"diagnostics"`
+	API         string `json:"api"`
 }
 
 type TProxyStatus struct {
@@ -242,12 +243,13 @@ func collectSnapshot(rt *runtimeState) (Status, error) {
 	out.DesiredTransparent = "close"
 
 	out.Services = ServiceStatus{
-		V2rayA:    serviceState("v2raya"),
-		Front:     serviceState("vpn-front"),
-		Policy:    serviceState("vpn-policy"),
-		Watchdog:  serviceState("vpn-backend-watchdog"),
-		Collector: serviceState("vpn-dashboard-collector"),
-		API:       serviceState("vpn-guardian-api"),
+		V2rayA:      serviceState("v2raya"),
+		Front:       serviceState("vpn-front"),
+		Policy:      serviceState("vpn-policy"),
+		Watchdog:    serviceState("vpn-backend-watchdog"),
+		Collector:   serviceState("vpn-dashboard-collector"),
+		Diagnostics: serviceState("vpn-guardian-diagnostics"),
+		API:         serviceState("vpn-guardian-api"),
 	}
 	out.DNSMode = stack.DNS.Mode
 	out.DNSFrontend = "dnsmasq"

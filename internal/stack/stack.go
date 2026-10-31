@@ -441,6 +441,7 @@ func generate(dir string, s Stack, r Routing) error {
 		{"vpn-dns-xray.init", makeXrayInit("vpn-dns-xray", paths.DNSXrayConfig, s.AssetsDir, 97, 8)},
 		{"vpn-backend-watchdog.init", makeWatchdogInit(s)},
 		{"vpn-dashboard-collector.init", makeCollectorInit(s)},
+		{"vpn-guardian-diagnostics.init", makeDiagnosticsInit()},
 	}
 	for _, script := range scripts {
 		if err := os.WriteFile(filepath.Join(dir, script.name), []byte(script.body), 0755); err != nil {
@@ -683,6 +684,30 @@ func makeCollectorInit(s Stack) string {
 	}
 	return strings.Join(lines, "\n")
 }
+
+// Diagnostics remains independent of the routing and VPN control plane.
+// Its persistent logs are stored on overlay and intentionally are not part
+// of configuration backups or wiped during cleanup.
+func makeDiagnosticsInit() string {
+	return strings.Join([]string{
+		"#!/bin/sh /etc/rc.common",
+		"USE_PROCD=1",
+		"START=99",
+		"STOP=8",
+		"PROG=/usr/bin/vpn-guardian",
+		"start_service() {",
+		"  procd_open_instance vpn-guardian-diagnostics",
+		"  procd_set_param command \"$PROG\" diagnostics -mode daemon -interval 10s",
+		"  procd_set_param stdout 1",
+		"  procd_set_param stderr 1",
+		"  procd_set_param respawn 5 5 0",
+		"  procd_set_param limits nofile=\"4096 4096\"",
+		"  procd_close_instance",
+		"}",
+		"",
+	}, "\n")
+}
+
 func validateGenerated(ctx context.Context, dir, assetsDir string) error {
 	xrayConfigs := []string{
 		filepath.Base(paths.DNSXrayConfig),
@@ -791,6 +816,7 @@ func applyCmd() error {
 		"vpn-guardian-dns.init":                   paths.DNSServiceInit,
 		"vpn-backend-watchdog.init":               paths.WatchdogServiceInit,
 		"vpn-dashboard-collector.init":            paths.CollectorServiceInit,
+		"vpn-guardian-diagnostics.init":           paths.DiagnosticsServiceInit,
 	}
 	for src, dst := range files {
 		mode := fs.FileMode(0644)
@@ -1077,7 +1103,7 @@ func cleanupCmd() error {
 }
 
 func cleanupGeneratedRuntime() {
-	for _, svc := range []string{"vpn-dashboard-collector", "vpn-backend-watchdog", "vpn-guardian-dns", "vpn-dns-xray", "vpn-front-routing", "vpn-front", "vpn-policy"} {
+	for _, svc := range []string{"vpn-guardian-diagnostics", "vpn-dashboard-collector", "vpn-backend-watchdog", "vpn-guardian-dns", "vpn-dns-xray", "vpn-front-routing", "vpn-front", "vpn-policy"} {
 		initPath := "/etc/init.d/" + svc
 		if _, err := os.Stat(initPath); err == nil {
 			_, _ = run(initPath, "stop")
@@ -1105,6 +1131,7 @@ func cleanupGeneratedRuntime() {
 		paths.DNSXrayServiceInit,
 		paths.WatchdogServiceInit,
 		paths.CollectorServiceInit,
+		paths.DiagnosticsServiceInit,
 	} {
 		_ = os.Remove(path)
 	}
@@ -1131,6 +1158,7 @@ func enableStackServices() error {
 		"vpn-guardian-dns",
 		"vpn-backend-watchdog",
 		"vpn-dashboard-collector",
+		"vpn-guardian-diagnostics",
 	} {
 		if out, err := run("/etc/init.d/"+svc, "enable"); err != nil {
 			return fmt.Errorf("enable %s: %v: %s", svc, err, out)
@@ -1209,7 +1237,7 @@ func restartStack() error {
 		return fmt.Errorf("restart vpn-front-routing: %v: %s", err, out)
 	}
 
-	for _, svc := range []string{"vpn-backend-watchdog", "vpn-dashboard-collector"} {
+	for _, svc := range []string{"vpn-backend-watchdog", "vpn-dashboard-collector", "vpn-guardian-diagnostics"} {
 		if out, err := run("/etc/init.d/"+svc, "restart"); err != nil {
 			return fmt.Errorf("restart %s: %v: %s", svc, err, out)
 		}
@@ -1294,6 +1322,7 @@ var backupFiles = []string{
 	paths.DNSServiceInit,
 	paths.WatchdogServiceInit,
 	paths.CollectorServiceInit,
+	paths.DiagnosticsServiceInit,
 }
 
 func backup(reason string) (string, error) {
