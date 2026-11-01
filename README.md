@@ -85,3 +85,5 @@ vpn-guardian apply
 ~~~
 
 [Установка и диагностика](docs/installation.md) · [Архитектура](docs/architecture.md) · [Примеры конфигурации](configs/)
+
+[Итоги диагностики Guardian / NotebookLM и незавершённые проверки](docs/validation/2026-11-02-notebooklm-handoff.md)
