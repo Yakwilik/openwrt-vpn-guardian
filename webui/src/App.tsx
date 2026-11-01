@@ -13,9 +13,10 @@ import { ServicesPanel } from "./components/ServicesPanel";
 import { StatusOverview } from "./components/StatusOverview";
 import { SubscriptionsPanel } from "./components/SubscriptionsPanel";
 import { TrafficPath } from "./components/TrafficPath";
+import { TrafficModePanel } from "./components/TrafficModePanel";
 import { useControlActions } from "./hooks/useControlActions";
 import { useDashboardData } from "./hooks/useDashboardData";
-import type { DNSMode, NodeInfo, QUICMode, RoutingGroup, RoutingRule, RoutingState, SubscriptionInfo } from "./types";
+import type { TrafficMode, DNSMode, NodeInfo, QUICMode, RoutingGroup, RoutingRule, RoutingState, SubscriptionInfo } from "./types";
 
 interface ConfirmState {
   title: string;
@@ -188,6 +189,21 @@ export default function App() {
     );
   }
 
+  function changeTrafficMode(mode: TrafficMode) {
+    ask({
+      title: mode === "full-vpn" ? "Направить весь трафик через VPN?" : "Вернуться к выборочным правилам?",
+      description: mode === "full-vpn"
+        ? "Для всех устройств за GL-MT внешний TCP/UDP и DNS пойдут через выбранную VPN-ноду. Прямой выход при отказе VPN и внешний IPv6 будут заблокированы. При переключении текущие соединения могут кратко прерваться."
+        : "Снова будут действовать сохранённые маршруты и настройки DNS. Остальной трафик сможет выходить напрямую. Текущие соединения могут кратко прерваться.",
+      confirmLabel: mode === "full-vpn" ? "Включить полный VPN" : "Включить выборочные правила",
+      run: async () => {
+        const result = await actions.controlAction("traffic_mode", { trafficMode: mode },
+          mode === "full-vpn" ? "Весь трафик направлен через VPN" : "Выборочная маршрутизация восстановлена");
+        if (result) await dashboard.refreshAll();
+      },
+    });
+  }
+
   function changeQUICMode(mode: QUICMode) {
     const apply = async () => {
       const next = await actions.controlAction(
@@ -260,6 +276,8 @@ export default function App() {
 
       <div className="dashboard-layout">
         <div className="dashboard-main">
+          <TrafficModePanel control={dashboard.control} status={dashboard.status}
+            busy={actions.busy} onMode={changeTrafficMode} />
           <TrafficPath status={dashboard.status} />
           <QUICPanel
             status={dashboard.status}

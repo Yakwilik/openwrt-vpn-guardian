@@ -14,7 +14,10 @@ export interface TProxyStatus {
   route_table: number;
 }
 
+export type TrafficMode = "selective" | "full-vpn";
+
 export interface StatusSnapshot {
+  traffic_mode?: TrafficMode;
   now: number;
   overall: OverallState;
   architecture: string;
@@ -174,6 +177,7 @@ export interface DNSState {
 }
 
 export interface ControlResponse {
+  trafficMode?: TrafficMode;
   ok: boolean;
   authenticated: boolean;
   authConfigured: boolean;

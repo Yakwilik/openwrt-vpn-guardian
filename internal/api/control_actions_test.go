@@ -136,3 +136,29 @@ func TestRoutingLegacyControlPayloadRetainsExistingMembership(t *testing.T) {
 		t.Fatalf("explicitly clearing groups did not work: %#v, %v", withoutGroups, err)
 	}
 }
+
+func TestTrafficModeAPIContractAndInvalidRequests(t *testing.T) {
+	var req controlRequest
+	if err := json.Unmarshal([]byte(`{"action":"traffic_mode","trafficMode":"full-vpn"}`), &req); err != nil {
+		t.Fatal(err)
+	}
+	if req.TrafficMode != config.TrafficFullVPN {
+		t.Fatalf("traffic mode was lost: %+v", req)
+	}
+	raw, err := json.Marshal(controlResponse{TrafficMode: config.TrafficFullVPN})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["trafficMode"] != "full-vpn" {
+		t.Fatal("saved traffic mode absent from control response")
+	}
+	for _, mode := range []string{"", "garbage", "direct"} {
+		if _, err := executeControlAction(controlRequest{Action: "traffic_mode", TrafficMode: mode}); err == nil {
+			t.Fatal("invalid traffic mode accepted")
+		}
+	}
+}

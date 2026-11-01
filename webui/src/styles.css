@@ -1729,3 +1729,6 @@ button:disabled {
     grid-template-columns: 1fr;
   }
 }
+
+.traffic-mode-selector { margin: 14px 0 12px; display: flex; flex-wrap: wrap; gap: 4px; }
+.traffic-mode-selector button { flex: 1 1 220px; min-height: 42px; }

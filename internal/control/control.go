@@ -1486,6 +1486,13 @@ func SetAutoFront() error {
 
 func SetDirectFront() error {
 	return withFrontControlLock(func() error {
+		stack, err := config.LoadStack()
+		if err != nil {
+			return err
+		}
+		if stack.FullVPN() {
+			return errors.New("сначала выключите режим «Весь трафик через VPN»")
+		}
 		c := loadControl()
 		c.Mode = "direct"
 		clearPin(&c)
@@ -1578,6 +1585,13 @@ func SetFailurePolicyFront(policy string) error {
 	}
 	return withFrontControlLock(func() error {
 		c := loadControl()
+		stack, err := config.LoadStack()
+		if err != nil {
+			return err
+		}
+		if stack.FullVPN() && policy == "failopen" {
+			return errors.New("полный VPN не допускает Fail-open; сначала включите выборочную маршрутизацию")
+		}
 		c.FailurePolicy = policy
 		if err := saveControl(c); err != nil {
 			return err

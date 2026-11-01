@@ -22,8 +22,9 @@ export function ControlPanel({
   onSetPin,
 }: ControlPanelProps) {
   const canManage = Boolean(control?.authenticated && control.authConfigured);
+  const fullVPN = control?.trafficMode === "full-vpn";
   const mode = control?.control.mode ?? "auto";
-  const policy = control?.control.failurePolicy ?? control?.policyMode ?? "killswitch";
+  const policy = fullVPN ? "killswitch" : control?.control.failurePolicy ?? control?.policyMode ?? "killswitch";
 
   return (
     <section className="panel">
@@ -41,7 +42,7 @@ export function ControlPanel({
         <ControlGroup title="Режим" value={modeLabel(mode)}>
           <div className="segmented">
             <button className={mode === "auto" ? "active" : ""} disabled={!canManage || Boolean(busy)} onClick={() => onMode("auto")}>Auto</button>
-            <button className={mode === "direct" ? "active" : ""} disabled={!canManage || Boolean(busy)} onClick={() => onMode("direct")}>Direct</button>
+            <button className={mode === "direct" ? "active" : ""} disabled={!canManage || Boolean(busy) || fullVPN} onClick={() => onMode("direct")}>Direct</button>
           </div>
           {mode === "pinned" && <div className="inline-note">Pinned: <strong>{control?.control.pinName || "выбранная нода"}</strong></div>}
         </ControlGroup>
@@ -49,11 +50,11 @@ export function ControlPanel({
         <ControlGroup title="При сбое VPN" value={policyLabel(policy)}>
           <div className="segmented">
             <button className={policy === "killswitch" ? "active" : ""} disabled={!canManage || Boolean(busy)} onClick={() => onPolicy(true)}>VPN-only</button>
-            <button className={policy === "failopen" ? "active" : ""} disabled={!canManage || Boolean(busy)} onClick={() => onPolicy(false)}>Fail-open</button>
+            <button className={policy === "failopen" ? "active" : ""} disabled={!canManage || Boolean(busy) || fullVPN} onClick={() => onPolicy(false)}>Fail-open</button>
           </div>
           <div className="inline-note">
             {policy === "killswitch"
-              ? "Proxy-класс не уйдёт в direct при отказе backend."
+              ? (fullVPN ? "Полный VPN: весь внешний трафик защищён от прямого выхода." : "Proxy-класс не уйдёт в direct при отказе backend.")
               : "Proxy-класс может временно перейти в direct."}
           </div>
         </ControlGroup>

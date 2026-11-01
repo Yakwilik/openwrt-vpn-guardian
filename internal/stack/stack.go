@@ -65,6 +65,11 @@ func Run(args []string) error {
 
 	case "quic-mode":
 		return configureQUIC(commandArgs)
+	case "traffic-mode":
+		if len(commandArgs) != 1 {
+			return errors.New("usage: vpn-guardian traffic-mode selective|full-vpn")
+		}
+		return ConfigureTrafficMode(commandArgs[0])
 
 	case "status":
 		if err := requireNoArgs(command, commandArgs); err != nil {
@@ -375,7 +380,7 @@ func serviceRunning(name string) bool {
 	return err == nil && strings.Contains(out, "running")
 }
 
-func makeFront(s Stack, r Routing) map[string]any {
+func makeSelectiveFront(s Stack, r Routing) map[string]any {
 	return map[string]any{
 		"log": map[string]any{"loglevel": "warning", "access": "none"},
 		"inbounds": []any{
@@ -555,6 +560,7 @@ func makeNFT(s Stack) string {
 	}
 	b.WriteString(" }\n  }\n")
 	writeQUICRejectChains(&b, s)
+	writeFullVPNGuard(&b, s)
 	// DNS clients always reach native dnsmasq, never the Guardian upstream.
 	// Client DNS belongs to the configured LAN only. Management/WAN peers must
 	// use their own resolver and local records; an accidental fw4 allow rule

@@ -89,6 +89,7 @@ type HealthBrief struct {
 }
 
 type Status struct {
+	TrafficMode         string                 `json:"traffic_mode"`
 	QUICMode            string                 `json:"quic_mode"`
 	DNSHealthy          bool                   `json:"dns_healthy"`
 	DNSOnlyProxyDomains bool                   `json:"dns_only_proxy_domains"`
@@ -252,6 +253,8 @@ func collectSnapshot(rt *runtimeState) (Status, error) {
 		Diagnostics: serviceState("vpn-guardian-diagnostics"),
 		API:         serviceState("vpn-guardian-api"),
 	}
+	out.TrafficMode = stack.TrafficMode()
+	stack.DNS = stack.EffectiveClientDNS()
 	out.QUICMode = stack.Front.QUICMode
 	if out.QUICMode == "" {
 		out.QUICMode = "allow"
@@ -259,6 +262,10 @@ func collectSnapshot(rt *runtimeState) (Status, error) {
 	out.DNSMode = stack.DNS.Mode
 	out.DNSFrontend = "dnsmasq"
 	out.DNSRuntimePolicy = policy.DNSRuntimeAt("/")
+	if stack.FullVPN() {
+		out.DNSRuntimePolicy = "killswitch"
+		out.FailurePolicy = "killswitch"
+	}
 	out.Services.DNS = serviceState("vpn-guardian-dns")
 	out.DNSIntercept = commandContains("nft", []string{"list", "table", "inet", "vpn_front"}, "chain dns_redirect")
 	out.DNSReady = out.Services.DNS == "running" && serviceState("dnsmasq") == "running" && dnsfront.Check(stack.DNS.ListenPort) == nil &&
@@ -285,6 +292,9 @@ func collectSnapshot(rt *runtimeState) (Status, error) {
 	out.EgressIP = rt.lastEgress
 
 	out.FallbackDirect = policy.Runtime() == "failopen-direct" || (ctrl.FailurePolicy == "failopen" && state.LastHealth.Status == "down")
+	if stack.FullVPN() {
+		out.FallbackDirect = false
+	}
 	out.DNSOnlyProxyDomains = stack.DNS.ProxyOnly()
 	key := dnsConfigKey(stack)
 	if rt.lastDNSKey != key || time.Since(rt.lastDNSAt) > 15*time.Second {

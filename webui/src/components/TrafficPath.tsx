@@ -5,6 +5,7 @@ interface TrafficPathProps {
 }
 
 export function TrafficPath({ status }: TrafficPathProps) {
+  const fullVPN = status?.traffic_mode === "full-vpn";
   const frontReady = Boolean(status?.tproxy_active && status?.tproxy?.front_port);
   const backendReady = Boolean(status?.tproxy?.backend_socks && status?.health_count);
   const directReady = status?.services?.front === "running";
@@ -13,19 +14,19 @@ export function TrafficPath({ status }: TrafficPathProps) {
     <section className="panel">
       <PanelHeading
         title="Путь трафика"
-        description="Direct-трафик и VPN-класс разделены до backend."
+        description={fullVPN ? "Весь внешний клиентский трафик через VPN; прямой выход закрыт." : "Direct-трафик и VPN-класс разделены до backend."}
       />
 
       <div className="routes">
-        <Route
+        {!fullVPN && <Route
           label="Direct"
           healthy={directReady}
           steps={["LAN", "vpn-front", "freedom", "Internet"]}
-        />
+        />}
         <Route
-          label="Proxy"
+          label={fullVPN ? "Весь трафик" : "Proxy"}
           healthy={frontReady && backendReady}
-          steps={["LAN", "vpn-front", "vpn-policy", "v2rayA", "VPN node"]}
+          steps={fullVPN ? ["LAN", "vpn-front", "v2rayA", "VPN node"] : ["LAN", "vpn-front", "vpn-policy", "v2rayA", "VPN node"]}
         />
         <Route
           label="DNS"

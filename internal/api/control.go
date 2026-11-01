@@ -47,6 +47,7 @@ type controlRequest struct {
 	Transports          []config.Transport     `json:"transports,omitempty"`
 	Rules               []config.RoutingRule   `json:"rules,omitempty"`
 	Groups              *[]config.RoutingGroup `json:"groups,omitempty"`
+	TrafficMode         string                 `json:"trafficMode,omitempty"`
 	QUICMode            string                 `json:"quicMode,omitempty"`
 	DNSMode             string                 `json:"dnsMode,omitempty"`
 	DNSOnlyProxyDomains *bool                  `json:"dnsOnlyProxyDomains,omitempty"`
@@ -81,6 +82,7 @@ type dnsResponse struct {
 }
 
 type controlResponse struct {
+	TrafficMode    string                     `json:"trafficMode"`
 	OK             bool                       `json:"ok"`
 	Authenticated  bool                       `json:"authenticated"`
 	AuthConfigured bool                       `json:"authConfigured"`
@@ -274,6 +276,7 @@ func makeControlResponse(authenticated, configured bool) (controlResponse, error
 		mode = "pin"
 	}
 	return controlResponse{
+		TrafficMode:    stack.TrafficMode(),
 		OK:             true,
 		Authenticated:  authenticated,
 		AuthConfigured: configured,

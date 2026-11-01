@@ -86,6 +86,8 @@ func executeControlAction(req controlRequest) (string, error) {
 		return "", stackruntime.ApplyRouting(routing)
 	case "dns":
 		return "", stackruntime.ApplyDNS(req.DNSMode, req.DNSResolvers, req.DNSOnlyProxyDomains)
+	case "traffic_mode":
+		return "", stackruntime.ConfigureTrafficMode(req.TrafficMode)
 	case "quic_mode":
 		if req.QUICMode != "allow" && req.QUICMode != "tcp-fallback" {
 			return "", errors.New("quicMode must be allow or tcp-fallback")

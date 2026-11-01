@@ -28,7 +28,7 @@ func TestDNSSelectorsSystemAndExplicitAllDomains(t *testing.T) {
 	all := false
 	for _, mode := range []string{config.DNSModeCustom, config.DNSModeXray} {
 		selectors, err := dnsSelectors(selectorStack(mode, &all), rules)
-		if err != nil || !strings.Contains(string(selectors), "server=/#/127.0.0.1#20176\n") {
+		if err != nil || !strings.Contains(string(selectors), "server=/regex:^.*$/127.0.0.1#20176\n") {
 			t.Fatalf("explicit all-domain policy lost: %q %v", selectors, err)
 		}
 	}
@@ -149,4 +149,21 @@ func selectedByStackConfig(t *testing.T, selectors []byte, name string) bool {
 		}
 	}
 	return false
+}
+
+func TestAllDomainDNSDoesNotJoinNativeDefaultResolverPool(t *testing.T) {
+	all := false
+	s := selectorStack(config.DNSModeCustom, &all)
+	selectors, err := dnsSelectors(s, config.Routing{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(selectors), "server=/#/") || !strings.Contains(string(selectors), "server=/regex:^.*$/") {
+		t.Fatalf("all-DNS selector can race with native/WAN upstreams: %s", selectors)
+	}
+	for _, name := range []string{"ya.ru", "random.example.com", "accounts.google.com"} {
+		if !selectedByStackConfig(t, selectors, name) {
+			t.Errorf("unprotected %s", name)
+		}
+	}
 }

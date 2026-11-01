@@ -33,7 +33,8 @@ export function DNSPanel({
   busy?: string;
   onSave: (mode: DNSMode, resolvers: string[], onlyProxyDomains: boolean) => Promise<void>;
 }) {
-  const canManage = Boolean(control?.authenticated && control.authConfigured);
+  const fullVPN = control?.trafficMode === "full-vpn";
+  const canManage = Boolean(control?.authenticated && control.authConfigured && !fullVPN);
   const serverMode = normalizeMode(control?.dns?.mode);
   const serverResolvers = control?.dns?.resolvers ?? [];
   const serverOnlyProxy = control?.dns?.onlyProxyDomains ?? true;
@@ -68,6 +69,8 @@ export function DNSPanel({
         <span className="panel-counter">{modeLabel(serverMode)}</span>
       </div>
 
+      {fullVPN && <p className="quic-warning">Полный VPN: DNS всех внешних доменов идёт через VPN, без прямого fallback.
+        Ниже сохранённые настройки для выборочного режима; они восстановятся после его включения.</p>}
       <div className="dns-settings">
         <div className="control-group">
           <div className="control-group-head">

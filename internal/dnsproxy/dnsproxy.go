@@ -54,6 +54,7 @@ func newServer(rt *Runtime) *Server {
 	return s
 }
 func BuildRuntime(s config.Stack, r config.Routing, root string) (*Runtime, error) {
+	s.DNS = s.EffectiveClientDNS()
 	matcher, err := LoadDomainMatcher(r.ProxyDomains, s.AssetsDir)
 	if err != nil {
 		return nil, err
@@ -62,6 +63,10 @@ func BuildRuntime(s config.Stack, r config.Routing, root string) (*Runtime, erro
 	rt := &Runtime{Mode: s.DNS.Mode, OnlyProxyDomains: s.DNS.ProxyOnly(), Matcher: matcher,
 		SOCKSAddr: fmt.Sprintf("127.0.0.1:%d", s.Backend.SocksPort), XrayResolver: fmt.Sprintf("127.0.0.1:%d", s.DNS.XrayPort),
 		Policy: func() string { return policy.DNSRuntimeAt(root) }, SystemSource: func() ([]string, error) { return dnsfront.ReadResolvers(root, own) }}
+	if s.FullVPN() {
+		// Full VPN never inherits an administrative Direct/fail-open route.
+		rt.Policy = func() string { return "killswitch" }
+	}
 	source := s.DNS.Resolvers
 	if s.DNS.Mode == config.DNSModeXray {
 		source = config.DefaultClientDNS().Resolvers

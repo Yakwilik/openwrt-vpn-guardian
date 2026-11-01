@@ -33,6 +33,7 @@ type Stack struct {
 }
 
 type Front struct {
+	TrafficMode string `json:"trafficMode,omitempty"`
 	// QUICMode is opt-in: legacy manifests retain UDP forwarding.
 	QUICMode         string `json:"quicMode,omitempty"`
 	SocksPort        int    `json:"socksPort"`
@@ -378,6 +379,9 @@ func (s Stack) Validate() error {
 		return err
 	}
 
+	if s.TrafficMode() != TrafficSelective && s.TrafficMode() != TrafficFullVPN {
+		return fmt.Errorf("invalid front.trafficMode %q", s.Front.TrafficMode)
+	}
 	if s.Front.QUICMode != "" && s.Front.QUICMode != "allow" && s.Front.QUICMode != "tcp-fallback" {
 		return fmt.Errorf("invalid front.quicMode %q", s.Front.QUICMode)
 	}
