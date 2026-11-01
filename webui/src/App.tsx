@@ -13,10 +13,9 @@ import { ServicesPanel } from "./components/ServicesPanel";
 import { StatusOverview } from "./components/StatusOverview";
 import { SubscriptionsPanel } from "./components/SubscriptionsPanel";
 import { TrafficPath } from "./components/TrafficPath";
-import { TrafficModePanel } from "./components/TrafficModePanel";
 import { useControlActions } from "./hooks/useControlActions";
 import { useDashboardData } from "./hooks/useDashboardData";
-import type { TrafficMode, DNSMode, NodeInfo, QUICMode, RoutingGroup, RoutingRule, RoutingState, SubscriptionInfo } from "./types";
+import type { DashboardMode, DNSMode, NodeInfo, QUICMode, RoutingGroup, RoutingRule, RoutingState, SubscriptionInfo } from "./types";
 
 interface ConfirmState {
   title: string;
@@ -54,21 +53,40 @@ export default function App() {
     }
   }
 
-  function changeMode(mode: "auto" | "direct") {
-    if (mode === "auto") {
-      void actions.controlAction("auto", {}, "Auto mode включён");
-      return;
-    }
+  function changeMode(mode: DashboardMode) {
+    const current = dashboard.control;
+    if (!current || actions.busy) return;
+    const full = current.trafficMode === "full-vpn";
+    if (mode === "full-vpn" && full) return;
+    if (mode !== "full-vpn" && !full && current.control.mode === mode) return;
+    const apply = async () => { await actions.setRoutingMode(mode); };
 
-    ask({
-      title: "Перейти в Direct?",
-      description:
-        "Proxy-класс временно перестанет использовать VPN. vpn-front останется частью пути трафика.",
-      confirmLabel: "Включить Direct",
-      run: async () => {
-        await actions.controlAction("direct", {}, "Direct mode включён");
-      },
-    });
+    if (mode === "full-vpn") {
+      ask({
+        title: "Включить Full VPN?",
+        description: "Весь внешний IPv4 TCP/UDP и DNS устройств за GL-MT пойдут через VPN. Прямого выхода при отказе VPN не будет. Сохранённые правила останутся на месте. Текущие соединения могут кратко прерваться.",
+        confirmLabel: "Включить Full VPN",
+        run: apply,
+      });
+    } else if (mode === "direct") {
+      ask({
+        title: "Перейти в Direct?",
+        description: full
+          ? "Full VPN будет отключён. Внешний трафик начнёт выходить напрямую, без VPN. Текущие соединения могут кратко прерваться."
+          : "Proxy-класс временно перестанет использовать VPN. vpn-front останется частью пути трафика.",
+        confirmLabel: "Включить Direct",
+        run: apply,
+      });
+    } else if (full) {
+      ask({
+        title: "Перейти в Auto?",
+        description: "Full VPN будет отключён. Снова будут действовать сохранённые правила и DNS-настройки; остальной трафик сможет выходить напрямую. Текущие соединения могут кратко прерваться.",
+        confirmLabel: "Включить Auto",
+        run: apply,
+      });
+    } else {
+      void apply();
+    }
   }
 
   function changePolicy(killswitch: boolean) {
@@ -189,21 +207,6 @@ export default function App() {
     );
   }
 
-  function changeTrafficMode(mode: TrafficMode) {
-    ask({
-      title: mode === "full-vpn" ? "Направить весь трафик через VPN?" : "Вернуться к выборочным правилам?",
-      description: mode === "full-vpn"
-        ? "Для всех устройств за GL-MT внешний TCP/UDP и DNS пойдут через выбранную VPN-ноду. Прямой выход при отказе VPN и внешний IPv6 будут заблокированы. При переключении текущие соединения могут кратко прерваться."
-        : "Снова будут действовать сохранённые маршруты и настройки DNS. Остальной трафик сможет выходить напрямую. Текущие соединения могут кратко прерваться.",
-      confirmLabel: mode === "full-vpn" ? "Включить полный VPN" : "Включить выборочные правила",
-      run: async () => {
-        const result = await actions.controlAction("traffic_mode", { trafficMode: mode },
-          mode === "full-vpn" ? "Весь трафик направлен через VPN" : "Выборочная маршрутизация восстановлена");
-        if (result) await dashboard.refreshAll();
-      },
-    });
-  }
-
   function changeQUICMode(mode: QUICMode) {
     const apply = async () => {
       const next = await actions.controlAction(
@@ -276,8 +279,6 @@ export default function App() {
 
       <div className="dashboard-layout">
         <div className="dashboard-main">
-          <TrafficModePanel control={dashboard.control} status={dashboard.status}
-            busy={actions.busy} onMode={changeTrafficMode} />
           <TrafficPath status={dashboard.status} />
           <QUICPanel
             status={dashboard.status}

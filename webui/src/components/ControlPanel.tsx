@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
-import type { ControlResponse, SelectionState } from "../types";
+import type { ControlResponse, DashboardMode, SelectionState } from "../types";
 import { modeLabel, policyLabel } from "../utils";
 
 interface ControlPanelProps {
   control?: ControlResponse;
   busy?: string;
-  onMode: (mode: "auto" | "direct") => void;
+  onMode: (mode: DashboardMode) => void;
   onPolicy: (killswitch: boolean) => void;
   onTransports: (transports: string[]) => Promise<void>;
   onManage: () => void;
@@ -27,7 +27,7 @@ export function ControlPanel({
   const policy = fullVPN ? "killswitch" : control?.control.failurePolicy ?? control?.policyMode ?? "killswitch";
 
   return (
-    <section className="panel">
+    <section className="panel" aria-label="Control plane">
       <div className="panel-heading">
         <div>
           <h2>Control plane</h2>
@@ -39,11 +39,31 @@ export function ControlPanel({
       </div>
 
       <div className="control-grid">
-        <ControlGroup title="Режим" value={modeLabel(mode)}>
-          <div className="segmented">
-            <button className={mode === "auto" ? "active" : ""} disabled={!canManage || Boolean(busy)} onClick={() => onMode("auto")}>Auto</button>
-            <button className={mode === "direct" ? "active" : ""} disabled={!canManage || Boolean(busy) || fullVPN} onClick={() => onMode("direct")}>Direct</button>
+        <ControlGroup title="Режим" value={fullVPN ? "Full VPN" : control ? modeLabel(mode) : "—"}>
+          <div className="segmented control-mode-selector" role="group" aria-label="Режим маршрутизации">
+            <button type="button" className={!fullVPN && mode === "auto" ? "active" : ""}
+              aria-pressed={Boolean(control && !fullVPN && mode === "auto")}
+              disabled={!canManage || Boolean(busy)} onClick={() => onMode("auto")}>Auto</button>
+            <button type="button" className={!fullVPN && mode === "direct" ? "active" : ""}
+              aria-pressed={Boolean(control && !fullVPN && mode === "direct")}
+              disabled={!canManage || Boolean(busy)} onClick={() => onMode("direct")}>Direct</button>
+            <button type="button" className={fullVPN ? "active" : ""}
+              aria-pressed={fullVPN}
+              disabled={!canManage || Boolean(busy)} onClick={() => onMode("full-vpn")}>Full VPN</button>
           </div>
+          <div className="inline-note">
+            {fullVPN
+              ? "Весь внешний IPv4 TCP/UDP и DNS клиентов через VPN. Прямого выхода при сбое нет; локальная сеть доступна."
+              : mode === "direct"
+                ? "Внешний трафик идёт напрямую, без VPN."
+                : "VPN используется по сохранённым правилам; остальные адреса — напрямую."}
+          </div>
+          {fullVPN && (
+            <details className="inline-note control-mode-details">
+              <summary>Ограничения Full VPN</summary>
+              <p>Внешний IPv6 и неподдерживаемые протоколы, например ICMP, блокируются от обхода VPN. Служебный трафик самого роутера не туннелируется. Настройка QUIC сохраняется.</p>
+            </details>
+          )}
           {mode === "pinned" && <div className="inline-note">Pinned: <strong>{control?.control.pinName || "выбранная нода"}</strong></div>}
         </ControlGroup>
 

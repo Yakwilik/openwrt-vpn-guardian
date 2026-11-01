@@ -1730,5 +1730,7 @@ button:disabled {
   }
 }
 
-.traffic-mode-selector { margin: 14px 0 12px; display: flex; flex-wrap: wrap; gap: 4px; }
-.traffic-mode-selector button { flex: 1 1 220px; min-height: 42px; }
+.control-mode-selector { display: flex; width: 100%; }
+.control-mode-selector button { flex: 1; min-width: 0; padding: 0 8px; white-space: nowrap; }
+.control-mode-details summary { cursor: pointer; color: var(--muted-strong); }
+.control-mode-details p { margin: 7px 0 0; }

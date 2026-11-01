@@ -15,6 +15,7 @@ export interface TProxyStatus {
 }
 
 export type TrafficMode = "selective" | "full-vpn";
+export type DashboardMode = "auto" | "direct" | "full-vpn";
 
 export interface StatusSnapshot {
   traffic_mode?: TrafficMode;

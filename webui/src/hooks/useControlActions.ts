@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { postControl } from "../api";
-import type { ControlPayload, ControlResponse } from "../types";
+import { applyDashboardMode } from "../routingMode";
+import type { ControlPayload, ControlResponse, DashboardMode } from "../types";
 
 interface ControlActionsOptions {
   control?: ControlResponse;
@@ -54,6 +55,25 @@ export function useControlActions({
     setControl(next);
     await loadStatus();
     return next;
+  }
+
+  async function setRoutingMode(mode: DashboardMode): Promise<boolean> {
+    if (!control?.authenticated) return false;
+    const label = mode === "full-vpn" ? "Full VPN" : mode === "direct" ? "Direct" : "Auto";
+    // One busy state covers every API step. Do not emit intermediate success
+    // messages or reuse a stale CSRF token from the previous response.
+    const next = await runAction(
+      "routing-mode",
+      async () => {
+        try {
+          return await applyDashboardMode(control, mode, postControl, setControl);
+        } finally {
+          await loadStatus();
+        }
+      },
+      `${label} включён`,
+    );
+    return Boolean(next);
   }
 
   async function login(pin: string): Promise<boolean> {
@@ -122,6 +142,7 @@ export function useControlActions({
     toastError,
     runAction,
     controlAction,
+    setRoutingMode,
     login,
     logout,
     setPin,
