@@ -118,6 +118,7 @@ jobs:
         with:
           name: vpn-guardian-openwrt-24.10-${{ matrix.arch }}
           path: dist/*
+          retention-days: 1
           if-no-files-found: error
 
   release:
